@@ -6,9 +6,10 @@
 
 import { clamp } from "../../core/math.ts";
 import type { City, GameState, ID, Point, Route, Station, World } from "../../core/types.ts";
-import { terrainAtPoint } from "../../world/terrain.ts";
+import { samplerForWorld, type TerrainSampler } from "../../world/terrain.ts";
+import { BIOME_RGB } from "../../world/biomes.ts";
 import { cityDisplayName } from "../../world/worldgen.ts";
-import { CITY_COLORS, MAP_BACKGROUND, TERRAIN_RGB } from "../palette.ts";
+import { CITY_COLORS, MAP_BACKGROUND } from "../palette.ts";
 import { Camera } from "./camera.ts";
 import {
   distToPolylineSq,
@@ -59,7 +60,11 @@ export class MapView {
     selectedRouteId: null,
     draft: null,
   };
-  private terrainCache: HTMLCanvasElement | null = null;
+  /** 無限地形：以視窗解析度即時取樣生態域，相機變動時才重算。 */
+  private sampler: TerrainSampler | null = null;
+  private biomeCanvas: HTMLCanvasElement | null = null;
+  private biomeImage: ImageData | null = null;
+  private terrainDirty = true;
 
   hoverCityId: ID | null = null;
   private hoverRouteId: ID | null = null;
@@ -118,10 +123,10 @@ export class MapView {
     this.world = world;
     this.cityMap = new Map(world.cities.map((c) => [c.id, c]));
     this.stationMap = new Map(world.stations.map((s) => [s.id, s]));
-    this.terrainCache = buildTerrainCache(world);
-    this.camera = new Camera(world.width, world.height);
+    this.sampler = samplerForWorld(world);
+    this.camera = new Camera(world.startCore.x, world.startCore.y, 0.24);
     this.handleResize();
-    this.camera.fit();
+    this.terrainDirty = true;
   }
 
   /** 綁定遊戲狀態（路線與列車皆由此讀取）。 */
@@ -129,16 +134,36 @@ export class MapView {
     this.state = state;
   }
 
+  /** 世界內容變動（探索新區域）後，重建城市與車站的查詢表。 */
+  refreshWorldData(): void {
+    if (!this.world) {
+      return;
+    }
+    this.cityMap = new Map(this.world.cities.map((c) => [c.id, c]));
+    this.stationMap = new Map(this.world.stations.map((s) => [s.id, s]));
+  }
+
   setVisual(visual: MapVisualState): void {
     this.visual = visual;
   }
 
-  fitToWorld(): void {
-    this.camera.fit();
+  /** 回到起始區域（無限世界沒有「整張地圖」）。 */
+  focusStart(): void {
+    if (this.world) {
+      this.camera.centerOn(this.world.startCore.x, this.world.startCore.y);
+      this.camera.zoom = clamp(0.24, this.camera.minZoom, this.camera.maxZoom);
+    }
+    this.terrainDirty = true;
+  }
+
+  /** 目前相機中心（世界座標）。 */
+  getCameraCenter(): Point {
+    return { x: this.camera.cx, y: this.camera.cy };
   }
 
   zoomBy(factor: number): void {
     this.camera.zoomAtScreen({ x: this.viewW / 2, y: this.viewH / 2 }, factor);
+    this.terrainDirty = true;
   }
 
   /** 播放新建路線的生成動畫。 */
@@ -152,8 +177,8 @@ export class MapView {
     if (!city) {
       return;
     }
-    this.camera.cx = city.position.x;
-    this.camera.cy = city.position.y;
+    this.camera.centerOn(city.position.x, city.position.y);
+    this.terrainDirty = true;
   }
 
   /** 城市目前所在的螢幕座標（相對畫布左上角）。 */
@@ -172,6 +197,7 @@ export class MapView {
     this.canvas.style.width = `${this.viewW}px`;
     this.canvas.style.height = `${this.viewH}px`;
     this.camera.setViewport(this.viewW, this.viewH);
+    this.terrainDirty = true;
     // 尺寸變更後立即重繪一次，避免等待下一個動畫幀造成空白閃爍。
     this.render();
   }
@@ -179,6 +205,15 @@ export class MapView {
   /** 供開發除錯與自動化驗證使用：立即重繪一次。 */
   debugRender(): void {
     this.render();
+  }
+
+  /** 供開發除錯與自動化驗證使用：直接設定相機。 */
+  debugSetCamera(x: number, y: number, zoom?: number): void {
+    this.camera.centerOn(x, y);
+    if (zoom !== undefined) {
+      this.camera.zoom = clamp(zoom, this.camera.minZoom, this.camera.maxZoom);
+    }
+    this.terrainDirty = true;
   }
 
   /* ------------------------------ 輸入處理 ------------------------------ */
@@ -229,6 +264,7 @@ export class MapView {
         );
         const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
         this.camera.zoomAtScreen(mid, target / this.camera.zoom);
+        this.terrainDirty = true;
       }
       return;
     }
@@ -241,6 +277,7 @@ export class MapView {
         this.pan.moved = true;
       }
       this.camera.panByScreen(dx, dy);
+      this.terrainDirty = true;
       this.pan.last = point;
       return;
     }
@@ -290,6 +327,7 @@ export class MapView {
     event.preventDefault();
     const factor = Math.exp(-event.deltaY * 0.0016);
     this.camera.zoomAtScreen(this.canvasPoint(event), factor);
+    this.terrainDirty = true;
   };
 
   private onContextMenu = (event: MouseEvent): void => {
@@ -301,11 +339,13 @@ export class MapView {
     if (!this.world) {
       return null;
     }
+    // 觸控裝置給更大的點擊容錯。
+    const slop = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches ? 14 : 7;
     let best: ID | null = null;
     let bestDist = Number.POSITIVE_INFINITY;
     for (const city of this.world.cities) {
       const screen = this.camera.worldToScreen(city.position);
-      const radius = markerRadius(city) + 7;
+      const radius = markerRadius(city) + slop;
       const d = Math.hypot(screen.x - point.x, screen.y - point.y);
       if (d < radius && d < bestDist) {
         best = city.id;
@@ -360,29 +400,73 @@ export class MapView {
     this.updateCursor();
   }
 
+  /**
+   * 無限生態域地形：把視窗以降低的解析度取樣成點陣圖，再平滑放大繪製。
+   * 只在相機變動（terrainDirty）時重新取樣。
+   */
   private drawTerrain(): void {
-    if (!this.terrainCache || !this.world) {
+    if (!this.sampler || !this.world) {
+      return;
+    }
+    if (this.terrainDirty || this.biomeCanvas === null) {
+      this.updateBiomeTerrain();
+      this.terrainDirty = false;
+    }
+    if (!this.biomeCanvas) {
       return;
     }
     const ctx = this.ctx;
-    const topLeft = this.camera.worldToScreen({ x: 0, y: 0 });
-    const bottomRight = this.camera.worldToScreen({
-      x: this.world.width,
-      y: this.world.height,
-    });
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(
-      this.terrainCache,
-      0,
-      0,
-      this.terrainCache.width,
-      this.terrainCache.height,
-      topLeft.x,
-      topLeft.y,
-      bottomRight.x - topLeft.x,
-      bottomRight.y - topLeft.y,
-    );
+    ctx.drawImage(this.biomeCanvas, 0, 0, this.biomeCanvas.width, this.biomeCanvas.height, 0, 0, this.viewW, this.viewH);
+  }
+
+  private updateBiomeTerrain(): void {
+    if (!this.sampler) {
+      return;
+    }
+    // 控制取樣量（約 26k 點），確保任何視窗尺寸都流暢。
+    const scale = Math.max(3, Math.round(Math.sqrt((this.viewW * this.viewH) / 26000)));
+    const w = Math.max(32, Math.ceil(this.viewW / scale));
+    const h = Math.max(32, Math.ceil(this.viewH / scale));
+    if (
+      !this.biomeCanvas ||
+      this.biomeCanvas.width !== w ||
+      this.biomeCanvas.height !== h ||
+      !this.biomeImage
+    ) {
+      this.biomeCanvas = document.createElement("canvas");
+      this.biomeCanvas.width = w;
+      this.biomeCanvas.height = h;
+      const bctx = this.biomeCanvas.getContext("2d");
+      if (!bctx) {
+        return;
+      }
+      this.biomeImage = bctx.createImageData(w, h);
+    }
+    const image = this.biomeImage;
+    const data = image.data;
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const worldPoint = this.camera.screenToWorld({
+          x: (px + 0.5) * scale,
+          y: (py + 0.5) * scale,
+        });
+        const sample = this.sampler.sampleAt(worldPoint);
+        const rgb = BIOME_RGB[sample.biome];
+        // 高度陰影讓山脈更有立體感。
+        const shade = (sample.elevation - 0.5) * 26;
+        const index = (py * w + px) * 4;
+        data[index] = clamp((rgb[0] as number) + shade, 0, 255);
+        data[index + 1] = clamp((rgb[1] as number) + shade, 0, 255);
+        data[index + 2] = clamp((rgb[2] as number) + shade, 0, 255);
+        data[index + 3] = 255;
+      }
+    }
+    const bctx = this.biomeCanvas.getContext("2d");
+    if (bctx) {
+      bctx.putImageData(image, 0, 0);
+    }
   }
 
   private buildPolylines(): void {
@@ -881,43 +965,4 @@ function roundRect(
   ctx.quadraticCurveTo(x, y, x + radius, y);
 }
 
-/** 產生地形點陣快取：整張地圖以固定解析度取樣一次。 */
-function buildTerrainCache(world: World): HTMLCanvasElement {
-  const scale = 4; // 每個快取像素代表的世界單位
-  const width = Math.ceil(world.width / scale);
-  const height = Math.ceil(world.height / scale);
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    return canvas;
-  }
-  const image = ctx.createImageData(width, height);
-  const data = image.data;
-  for (let py = 0; py < height; py++) {
-    for (let px = 0; px < width; px++) {
-      const worldPoint = { x: (px + 0.5) * scale, y: (py + 0.5) * scale };
-      const terrain = terrainAtPoint(world.grid, worldPoint);
-      const base = TERRAIN_RGB[terrain];
-      const jitter = cellJitter(px, py, scale, world.grid.cellSize);
-      const index = (py * width + px) * 4;
-      data[index] = clamp(base[0] + jitter, 0, 255);
-      data[index + 1] = clamp(base[1] + jitter, 0, 255);
-      data[index + 2] = clamp(base[2] + jitter, 0, 255);
-      data[index + 3] = 255;
-    }
-  }
-  ctx.putImageData(image, 0, 0);
-  return canvas;
-}
 
-/** 以格線位置產生穩定的小幅明度擾動，讓大面積色塊不會太平。 */
-function cellJitter(px: number, py: number, scale: number, cellSize: number): number {
-  const cx = Math.floor((px * scale) / cellSize);
-  const cy = Math.floor((py * scale) / cellSize);
-  let h = (cx * 73856093) ^ (cy * 19349663);
-  h = (h ^ (h >>> 13)) * 1274126177;
-  const normalized = ((h >>> 0) % 1000) / 1000;
-  return (normalized - 0.5) * 7;
-}

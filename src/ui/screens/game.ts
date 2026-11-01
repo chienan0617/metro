@@ -6,7 +6,7 @@
 import { formatMoney } from "../../core/format.ts";
 import { Store } from "../../core/store.ts";
 import type { GameSpeed, GameState, ID, ResearchLine } from "../../core/types.ts";
-import { TIME_CONFIG, TRAIN_CONFIG } from "../../game/config.ts";
+import { TIME_CONFIG, TRAIN_CONFIG, WORLD_CONFIG } from "../../game/config.ts";
 import {
   addStop,
   canAddStop,
@@ -37,7 +37,12 @@ import {
   upgradeTrain as upgradeTrainCommand,
 } from "../../game/trains.ts";
 import { trainModelById } from "../../game/trainModels.ts";
-import { stationById } from "../../world/worldgen.ts";
+import {
+  materializeTilesAround,
+  stationById,
+  type MaterializeContext,
+} from "../../world/worldgen.ts";
+import { pushNotification } from "../../game/progression.ts";
 import { clearNode, el, icon, openModal } from "../dom.ts";
 import { MapView } from "../map/mapView.ts";
 import { renderCityPanel } from "../panels/cityPanel.ts";
@@ -101,6 +106,9 @@ export class GameScreen {
   private secondsSinceAutosave = 0;
   private lastEmittedHour = -1;
   private lastNotificationId = 0;
+  /** 無限世界：已生成圖磚集合（與存檔同步）。 */
+  private tilesSet: Set<string>;
+  private discoveryAccumulator = 0;
   private lastNonZeroSpeed: GameSpeed = 1;
   private disposed = false;
   private disposers: Array<() => void> = [];
@@ -114,6 +122,7 @@ export class GameScreen {
     applySettings(this.settings);
     this.lastNotificationId = state.notifications.reduce((max, n) => Math.max(max, n.id), 0);
     this.lastEmittedHour = Math.floor(state.clock.minutes / 60);
+    this.tilesSet = new Set(state.materializedTiles);
 
     clearNode(root);
     const screen = el("div", { class: "screen game" });
@@ -121,7 +130,7 @@ export class GameScreen {
     screen.style.setProperty("--sidepanel-width", `${Math.round(this.settings.sidebarWidth)}px`);
 
     this.topbar = createTopbar({
-      onFit: () => this.mapView.fitToWorld(),
+      onFit: () => this.focusStartArea(),
       onHelp: () => openHelpModal(),
       onMenu: () => this.confirmExit(),
       onSetSpeed: (speed) => this.setSpeed(speed),
@@ -204,8 +213,8 @@ export class GameScreen {
     mapControls.appendChild(
       el("button", {
         class: "map-control-btn",
-        title: "顯示整張地圖",
-        onClick: () => this.mapView.fitToWorld(),
+        title: "回到起始區域",
+        onClick: () => this.focusStartArea(),
         html: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>',
       }),
     );
@@ -264,6 +273,10 @@ export class GameScreen {
         draftStops: () => (this.draft ? this.draft.stops.length : 0),
         setSpeed: (speed: GameSpeed) => this.setSpeed(speed),
         renderOnce: () => this.mapView.debugRender(),
+        flyTo: (x: number, y: number, zoom?: number) => {
+          this.mapView.debugSetCamera(x, y, zoom);
+          this.materializeDiscovery(true);
+        },
       };
     }
   }
@@ -318,7 +331,7 @@ export class GameScreen {
     this.disposers.push(() => window.removeEventListener("resize", onResize));
 
     this.onStateChanged();
-    this.mapView.fitToWorld();
+    this.mapView.focusStart();
     this.statusbar.setHint(
       "用右上角的速度控制（或空白鍵）開始營運；點選城市或路線查看資訊。按「建立路線」規劃新路線。",
     );
@@ -345,6 +358,12 @@ export class GameScreen {
         this.secondsSinceAutosave = 0;
         writeSave(state);
       }
+      // 無限世界探索：定期依相機位置生成周邊圖磚。
+      this.discoveryAccumulator += dt;
+      if (this.discoveryAccumulator >= 1.5) {
+        this.discoveryAccumulator = 0;
+        this.materializeDiscovery();
+      }
       // 每小時刷新一次面板（任務進度、營運數據、財務）。
       const hour = Math.floor(state.clock.minutes / 60);
       if (hour !== this.lastEmittedHour) {
@@ -353,6 +372,40 @@ export class GameScreen {
         this.store.notify();
       }
     }, 100);
+  }
+
+  /** 依目前相機位置生成周邊圖磚（無限世界的探索）。 */
+  private materializeDiscovery(force = false): void {
+    const center = this.mapView.getCameraCenter();
+    this.materializeAt(center.x, center.y, WORLD_CONFIG.discoveryRadiusTiles, force);
+  }
+
+  /** 在指定座標附近生成圖磚；有新城市時同步世界資料並通知 UI。 */
+  private materializeAt(x: number, y: number, radiusTiles: number, force = false): number {
+    const state = this.store.get();
+    const ctx: MaterializeContext = {
+      world: state.world,
+      tiles: this.tilesSet,
+      freeUnlock: state.mode === "free",
+    };
+    const before = state.world.cities.length;
+    materializeTilesAround(ctx, x, y, radiusTiles);
+    const added = state.world.cities.length - before;
+    if (added > 0 || force) {
+      state.materializedTiles = [...this.tilesSet];
+      this.mapView.refreshWorldData();
+      this.store.notify();
+      if (added >= 3) {
+        pushNotification(state, "info", `探索到新區域：+${added} 座城市`);
+      }
+    }
+    return added;
+  }
+
+  /** 回到起始區域並確保該區已生成。 */
+  private focusStartArea(): void {
+    this.mapView.focusStart();
+    this.materializeDiscovery(true);
   }
 
   /* ------------------------------ 通知、音效與震動 ------------------------------ */
@@ -994,6 +1047,18 @@ export class GameScreen {
       "success",
     );
     this.statusbar.setHint("路線已建成。到「車庫」購買列車並配置到路線，即可開始營運。");
+    // 連接新城市時，一併生成路線端點周邊的區域。
+    const builtState = this.store.get();
+    const endpoints = new Set<ID>([
+      route.stationIds[0] as ID,
+      route.stationIds[route.stationIds.length - 1] as ID,
+    ]);
+    for (const stationId of endpoints) {
+      const station = stationById(builtState.world, stationId);
+      if (station) {
+        this.materializeAt(station.position.x, station.position.y, WORLD_CONFIG.discoveryRadiusTiles);
+      }
+    }
     // 重要事件立即存檔。
     writeSave(this.store.get());
     this.refreshUi();

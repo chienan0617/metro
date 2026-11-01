@@ -1,9 +1,8 @@
 ﻿import { describe, expect, it } from "vitest";
 import { dist } from "../core/math.ts";
-import type { ID } from "../core/types.ts";
-import { generateTerrain, sampleTerrainMultiplier, TERRAIN_INDEX } from "../world/terrain.ts";
-import { Rng } from "../core/rng.ts";
-import { ECONOMY_CONFIG, ROUTE_CONFIG, WORLD_CONFIG } from "./config.ts";
+import type { ID, TerrainType } from "../core/types.ts";
+import { createTerrainSampler, sampleTerrainMultiplier } from "../world/terrain.ts";
+import { ECONOMY_CONFIG, ROUTE_CONFIG } from "./config.ts";
 import {
   addStop,
   canAddStop,
@@ -77,26 +76,16 @@ describe("路線建設", () => {
   });
 
   it("路段成本會依地形提高（水域與山地比平原貴）", () => {
-    const grid = {
-      width: WORLD_CONFIG.width,
-      height: WORLD_CONFIG.height,
-      cellSize: 34,
-      cols: 10,
-      rows: 10,
-      data: new Uint8Array(100),
-    };
-    grid.data.fill(TERRAIN_INDEX.plain);
     const a = { x: 20, y: 20 };
     const b = { x: 320, y: 20 };
-    const plainMultiplier = sampleTerrainMultiplier(grid, a, b);
+    const tile = (terrain: TerrainType) => () => terrain;
+    const plainMultiplier = sampleTerrainMultiplier(tile("plain"), a, b);
     expect(plainMultiplier).toBeCloseTo(1.0, 5);
 
-    grid.data.fill(TERRAIN_INDEX.water);
-    const waterMultiplier = sampleTerrainMultiplier(grid, a, b);
+    const waterMultiplier = sampleTerrainMultiplier(tile("water"), a, b);
     expect(waterMultiplier).toBeGreaterThan(plainMultiplier * 3);
 
-    grid.data.fill(TERRAIN_INDEX.mountain);
-    const mountainMultiplier = sampleTerrainMultiplier(grid, a, b);
+    const mountainMultiplier = sampleTerrainMultiplier(tile("mountain"), a, b);
     expect(mountainMultiplier).toBeGreaterThan(plainMultiplier * 2);
   });
 
@@ -323,9 +312,13 @@ describe("路線建設", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("地形格線生成是可重現的", () => {
-    const gridA = generateTerrain(new Rng(5));
-    const gridB = generateTerrain(new Rng(5));
-    expect(gridA.data).toEqual(gridB.data);
+  it("地形取樣器是可重現的（同一 seed 相同地形）", () => {
+    const a = createTerrainSampler(5, "auto");
+    const b = createTerrainSampler(5, "auto");
+    for (let i = 0; i < 40; i++) {
+      const p = { x: i * 137.5 - 2000, y: i * 91.3 + 500 };
+      expect(a.terrainAt(p)).toBe(b.terrainAt(p));
+      expect(a.biomeAt(p)).toBe(b.biomeAt(p));
+    }
   });
 });

@@ -1,12 +1,14 @@
 /**
- * 世界生成：由固定 seed 產生地形、城市群與車站。
- * 同一 seed 必須產生完全相同的世界，供存檔與測試使用。
+ * 無限世界生成。
+ * 世界被切成固定大小的「圖磚」；每個圖磚的城市完全由（seed、圖磚座標）決定，
+ * 玩家探索（相機移動、路線延伸）時逐步生成，內容永久穩定、可重現。
  */
 
 import { dist } from "../core/math.ts";
-import { Rng } from "../core/rng.ts";
+import { hashString, Rng } from "../core/rng.ts";
 import { emptyStationStats } from "../core/types.ts";
 import type {
+  BiomeId,
   City,
   CityType,
   GeographyChoice,
@@ -17,316 +19,298 @@ import type {
   World,
 } from "../core/types.ts";
 import { CITY_TYPE_PARAMS, CITY_UNLOCK_TIERS, STATION_CONFIG, WORLD_CONFIG } from "../game/config.ts";
-import { CAPITAL_NAME_POOL, CITY_NAME_POOL } from "./cityNames.ts";
-import { findLandNear, generateTerrain, terrainAtPoint } from "./terrain.ts";
+import { BIOME_CITY_WEIGHTS, type MapStyle } from "./biomes.ts";
+import { generateCityName } from "./cityNames.ts";
+import { createTerrainSampler, findLandNear, type TerrainSampler } from "./terrain.ts";
 
-interface Placement {
+export const TILE_SIZE = WORLD_CONFIG.tileSize;
+
+export function tileKey(tx: number, ty: number): string {
+  return `${tx},${ty}`;
+}
+
+export function parseTileKey(key: string): { tx: number; ty: number } | null {
+  const match = /^(-?\d+),(-?\d+)$/.exec(key);
+  if (!match || match[1] === undefined || match[2] === undefined) {
+    return null;
+  }
+  return { tx: Number.parseInt(match[1], 10), ty: Number.parseInt(match[2], 10) };
+}
+
+/* ------------------------------ 圖磚內容 ------------------------------ */
+
+interface TileCity {
+  index: number;
   position: Point;
+  biome: BiomeId;
   terrain: TerrainType;
-  kind: "core" | "satellite" | "remote";
+  cityType: CityType;
+  name: string;
+  population: number;
+  demandMultiplier: number;
+  growthRate: number;
+  developmentLevel: number;
 }
 
-export function generateWorld(seed: number, style: GeographyChoice = "auto"): World {
-  const rng = new Rng(seed);
-  const terrainRng = rng.fork("terrain");
-  const grid = generateTerrain(terrainRng, style === "auto" ? undefined : style);
-  const cityRng = rng.fork("cities");
+/** 純函式：產生單一圖磚的城市內容（不含命名去重），相同輸入永遠得到相同結果。 */
+function generateTileCities(
+  seed: number,
+  style: MapStyle,
+  tx: number,
+  ty: number,
+  excludedNames?: ReadonlySet<string>,
+): TileCity[] {
+  const rng = new Rng(hashString(`${seed}|tile|${tx}|${ty}`));
+  const sampler = createTerrainSampler(seed, style);
+  const baseX = tx * TILE_SIZE;
+  const baseY = ty * TILE_SIZE;
 
-  const placements: Placement[] = [];
-  const cores = placeCores(cityRng, grid);
-  for (const core of cores) {
-    placements.push(core);
-    placeSatellites(cityRng, grid, core, cores, placements);
-  }
-  placeRemoteCities(cityRng, grid, placements);
-
-  const world = buildWorld(seed, grid, placements, rng.fork("names"));
-  return world;
-}
-
-function placeCores(rng: Rng, grid: World["grid"]): Placement[] {
-  const cores: Placement[] = [];
-  const { width, height, borderMargin, minCoreDistance, regionCount } = WORLD_CONFIG;
-  let attempts = 0;
-  while (cores.length < regionCount && attempts < 6000) {
-    attempts++;
-    const p = {
-      x: rng.range(borderMargin, width - borderMargin),
-      y: rng.range(borderMargin, height - borderMargin),
-    };
-    const snapped = findLandNear(grid, p, 150);
-    if (!snapped) {
-      continue;
-    }
-    const terrain = terrainAtPoint(grid, snapped);
-    // 核心城市避免直接落在高山上。
-    if (terrain === "mountain" && rng.chance(0.75)) {
-      continue;
-    }
-    if (cores.some((c) => dist(c.position, snapped) < minCoreDistance)) {
-      continue;
-    }
-    cores.push({ position: snapped, terrain, kind: "core" });
-  }
-  return cores;
-}
-
-function placeSatellites(
-  rng: Rng,
-  grid: World["grid"],
-  core: Placement,
-  allCores: readonly Placement[],
-  out: Placement[],
-): void {
-  const [minCount, maxCount] = WORLD_CONFIG.satellitesPerRegion;
-  const count = rng.int(minCount, maxCount);
-  const [minDist, maxDist] = WORLD_CONFIG.satelliteDistance;
-  const attempted: Placement[] = [];
-  for (let i = 0; i < count; i++) {
-    let placed = false;
-    for (let attempt = 0; attempt < 160 && !placed; attempt++) {
-      const angle = rng.range(0, Math.PI * 2);
-      const distance = rng.range(minDist, maxDist);
+  // 以 5×5 網格估計陸地比例，決定這塊圖磚的城市數量。
+  let landProbes = 0;
+  for (let i = 0; i < 5; i++) {
+    for (let j = 0; j < 5; j++) {
       const p = {
-        x: core.position.x + Math.cos(angle) * distance,
-        y: core.position.y + Math.sin(angle) * distance,
+        x: baseX + ((i + 0.5) / 5) * TILE_SIZE,
+        y: baseY + ((j + 0.5) / 5) * TILE_SIZE,
       };
-      const snapped = findLandNear(grid, p, 70);
+      if (sampler.terrainAt(p) !== "water") {
+        landProbes++;
+      }
+    }
+  }
+  const landRatio = landProbes / 25;
+  if (landRatio < 0.1) {
+    return [];
+  }
+  const count = Math.min(
+    WORLD_CONFIG.maxCitiesPerTile,
+    Math.max(0, Math.round(landRatio * rng.range(WORLD_CONFIG.citiesPerTileRange[0], WORLD_CONFIG.citiesPerTileRange[1]))),
+  );
+
+  const inset = TILE_SIZE * WORLD_CONFIG.tileInsetRatio;
+  const cities: TileCity[] = [];
+  for (let i = 0; i < count; i++) {
+    for (let attempt = 0; attempt < 28; attempt++) {
+      const p = {
+        x: baseX + inset + rng.range(0, TILE_SIZE - inset * 2),
+        y: baseY + inset + rng.range(0, TILE_SIZE - inset * 2),
+      };
+      const snapped = findLandNear(sampler, p, 100);
       if (!snapped) {
         continue;
       }
-      const margin = WORLD_CONFIG.borderMargin * 0.6;
-      if (
-        snapped.x < margin ||
-        snapped.y < margin ||
-        snapped.x > WORLD_CONFIG.width - margin ||
-        snapped.y > WORLD_CONFIG.height - margin
-      ) {
+      if (cities.some((c) => dist(c.position, snapped) < WORLD_CONFIG.minCityDistance)) {
         continue;
       }
-      // 必須與已放置城市及所有核心城市保持最小距離。
-      if (!isFarEnough(snapped, [...out, ...allCores, ...attempted], WORLD_CONFIG.minCityDistance)) {
+      const sample = sampler.sampleAt(snapped);
+      const weights = BIOME_CITY_WEIGHTS[sample.biome];
+      const types = Object.keys(weights) as CityType[];
+      if (types.length === 0) {
         continue;
       }
-      const terrain = terrainAtPoint(grid, snapped);
-      attempted.push({ position: snapped, terrain, kind: "satellite" });
-      placed = true;
+      let cityType = types[rng.weightedIndex(types.map((t) => weights[t] ?? 0))] as CityType;
+      if (cityType === undefined) {
+        continue;
+      }
+      // 港口必須真的靠水。
+      if (cityType === "port" && sample.terrain !== "coast") {
+        cityType = rng.chance(0.5) ? "tourism" : "town";
+      }
+
+      // 命名（可選的去重集合：由呼叫端提供鄰近圖磚的名稱）。
+      let name = generateCityName(rng, sample.biome);
+      for (let tries = 0; tries < 24; tries++) {
+        const collides = (excludedNames?.has(name) ?? false) || cities.some((c) => c.name === name);
+        if (!collides) {
+          break;
+        }
+        name = generateCityName(rng, sample.biome);
+      }
+
+      const params = CITY_TYPE_PARAMS[cityType];
+      const population = roundTo(rng.range(params.population[0], params.population[1]), 1000);
+      const developmentLevel =
+        cityType === "capital" ? 3 : cityType === "port" || population > 600_000 ? 2 : 1;
+
+      cities.push({
+        index: i,
+        position: snapped,
+        biome: sample.biome,
+        terrain: sample.terrain,
+        cityType,
+        name,
+        population,
+        demandMultiplier: roundTo(rng.range(params.demand[0], params.demand[1]), 0.01),
+        growthRate: roundTo(rng.range(params.growth[0], params.growth[1]), 0.0001),
+        developmentLevel,
+      });
+      break;
     }
   }
-  out.push(...attempted);
+  return cities;
 }
 
-function placeRemoteCities(rng: Rng, grid: World["grid"], out: Placement[]): void {
-  const target = WORLD_CONFIG.remoteTarget;
-  let attempts = 0;
-  while (out.length < target && attempts < 4000) {
-    attempts++;
-    const p = {
-      x: rng.range(WORLD_CONFIG.borderMargin, WORLD_CONFIG.width - WORLD_CONFIG.borderMargin),
-      y: rng.range(WORLD_CONFIG.borderMargin, WORLD_CONFIG.height - WORLD_CONFIG.borderMargin),
-    };
-    const snapped = findLandNear(grid, p, 80);
-    if (!snapped) {
-      continue;
-    }
-    if (!isFarEnough(snapped, out, WORLD_CONFIG.remoteMinDistance)) {
-      continue;
-    }
-    const terrain = terrainAtPoint(grid, snapped);
-    out.push({ position: snapped, terrain, kind: "remote" });
-  }
-}
-
-function isFarEnough(p: Point, others: readonly Placement[], minDistance: number): boolean {
-  for (const other of others) {
-    if (dist(p, other.position) < minDistance) {
-      return false;
+/** 鄰近圖磚的名稱集合（固定視窗 → 命名結果與探索順序無關）。 */
+function neighborNames(seed: number, style: MapStyle, tx: number, ty: number): Set<string> {
+  const names = new Set<string>();
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) {
+        continue;
+      }
+      for (const city of generateTileCities(seed, style, tx + dx, ty + dy)) {
+        names.add(city.name);
+      }
     }
   }
-  return true;
+  return names;
 }
 
-/** 依位置與地形決定衛星／遠距城市的型別。 */
-function pickSatelliteType(rng: Rng, terrain: TerrainType): CityType {
-  if (terrain === "coast") {
-    const weights = [0.25, 0.18, 0.3, 0.15, 0.12]; // port, tourism, satellite, town, university
-    const types: CityType[] = ["port", "tourism", "satellite", "town", "university"];
-    return types[rng.weightedIndex(weights)] as CityType;
+/* ------------------------------ 生成與探索 ------------------------------ */
+
+export interface MaterializeContext {
+  world: World;
+  tiles: Set<string>;
+  /** 自由模式：全部城市直接解鎖。 */
+  freeUnlock: boolean;
+}
+
+function cityIdFor(tx: number, ty: number, index: number): string {
+  return `city-${tx}_${ty}_${index + 1}`;
+}
+
+function stationIdFor(tx: number, ty: number, index: number): string {
+  return `stn-${tx}_${ty}_${index + 1}`;
+}
+
+/** 生成單一圖磚並加入世界（不重複處理已生成的圖磚）。回傳新城市數。 */
+export function materializeTile(ctx: MaterializeContext, tx: number, ty: number): number {
+  const key = tileKey(tx, ty);
+  if (ctx.tiles.has(key)) {
+    return 0;
   }
-  if (terrain === "hill" || terrain === "mountain") {
-    const weights = [0.3, 0.25, 0.25, 0.1, 0.1]; // tourism, town, satellite, university, industrial
-    const types: CityType[] = ["tourism", "town", "satellite", "university", "industrial"];
-    return types[rng.weightedIndex(weights)] as CityType;
+  ctx.tiles.add(key);
+  const { world } = ctx;
+  const cities = generateTileCities(
+    world.seed,
+    world.style === "auto" ? "auto" : world.style,
+    tx,
+    ty,
+    neighborNames(world.seed, world.style === "auto" ? "auto" : world.style, tx, ty),
+  );
+  if (cities.length === 0) {
+    return 0;
   }
-  const weights = [0.4, 0.22, 0.16, 0.14, 0.08]; // satellite, town, industrial, university, tourism
-  const types: CityType[] = ["satellite", "town", "industrial", "university", "tourism"];
-  return types[rng.weightedIndex(weights)] as CityType;
-}
-
-function pickRemoteType(rng: Rng): CityType {
-  const weights = [0.5, 0.3, 0.2]; // town, tourism, industrial
-  const types: CityType[] = ["town", "tourism", "industrial"];
-  return types[rng.weightedIndex(weights)] as CityType;
-}
-
-function buildWorld(seed: number, grid: World["grid"], placements: Placement[], nameRng: Rng): World {
-  // 穩定排序，確保城市 ID 不因生成順序而變動。
-  const sorted = placements
-    .slice()
-    .sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x);
-
-  const namePool = nameRng.shuffle(CITY_NAME_POOL);
-  const capitalPool = nameRng.shuffle(CAPITAL_NAME_POOL);
-  const usedNames = new Set<string>();
-
-  const cities: City[] = [];
-  const stations: Station[] = [];
-
-  sorted.forEach((placement, index) => {
-    const id = idFor("city", index);
-    const cityType: CityType =
-      placement.kind === "core"
-        ? placement.terrain === "coast"
-          ? "port"
-          : "capital"
-        : pickTypeForPlacement(nameRng, placement);
-
-    const name = takeName(cityType, namePool, capitalPool, usedNames, index);
-    const params = CITY_TYPE_PARAMS[cityType];
-    const population = roundTo(nameRng.range(params.population[0], params.population[1]), 1000);
-    const developmentLevel =
-      cityType === "capital" ? 3 : cityType === "port" || population > 600_000 ? 2 : 1;
-
-    const city: City = {
+  for (const tileCity of cities) {
+    const id = cityIdFor(tx, ty, tileCity.index);
+    const unlockLevel = unlockLevelForPosition(world.startCore, tileCity.position);
+    ctx.world.cities.push({
       id,
-      name,
-      position: { ...placement.position },
-      population,
-      cityType,
-      industry: { ...params.industry },
-      demandMultiplier: roundTo(nameRng.range(params.demand[0], params.demand[1]), 0.01),
-      growthRate: roundTo(nameRng.range(params.growth[0], params.growth[1]), 0.0001),
-      terrain: placement.terrain,
-      developmentLevel,
-      unlocked: true,
-      unlockLevel: 0,
-      stationIds: [idFor("stn", index)],
-    };
-    cities.push(city);
-
-    stations.push({
-      id: idFor("stn", index),
+      name: tileCity.name,
+      position: { ...tileCity.position },
+      population: tileCity.population,
+      cityType: tileCity.cityType,
+      industry: { ...CITY_TYPE_PARAMS[tileCity.cityType].industry },
+      demandMultiplier: tileCity.demandMultiplier,
+      growthRate: tileCity.growthRate,
+      terrain: tileCity.terrain,
+      biome: tileCity.biome,
+      developmentLevel: tileCity.developmentLevel,
+      unlocked: ctx.freeUnlock || unlockLevel === 0,
+      unlockLevel,
+      stationIds: [stationIdFor(tx, ty, tileCity.index)],
+    });
+    ctx.world.stations.push({
+      id: stationIdFor(tx, ty, tileCity.index),
       cityId: id,
-      name: `${name}${STATION_SUFFIX}`,
-      position: { ...placement.position },
+      name: `${tileCity.name}站`,
+      position: { ...tileCity.position },
       level: 1,
       capacity: roundTo(
-        STATION_CONFIG.baseCapacity + population * STATION_CONFIG.capacityPerCitizen,
+        STATION_CONFIG.baseCapacity + tileCity.population * STATION_CONFIG.capacityPerCitizen,
         100,
       ),
       routeIds: [],
       satisfaction: STATION_CONFIG.initialSatisfaction,
       stats: emptyStationStats(),
     });
-  });
+  }
+  return cities.length;
+}
 
-  assignUnlockLevels(cities);
+/** 生成以某座標為中心的一定範圍圖磚。回傳新城市數。 */
+export function materializeTilesAround(
+  ctx: MaterializeContext,
+  x: number,
+  y: number,
+  radiusTiles: number,
+): number {
+  const minTx = Math.floor((x - radiusTiles * TILE_SIZE) / TILE_SIZE);
+  const maxTx = Math.floor((x + radiusTiles * TILE_SIZE) / TILE_SIZE);
+  const minTy = Math.floor((y - radiusTiles * TILE_SIZE) / TILE_SIZE);
+  const maxTy = Math.floor((y + radiusTiles * TILE_SIZE) / TILE_SIZE);
+  let added = 0;
+  for (let tx = minTx; tx <= maxTx; tx++) {
+    for (let ty = minTy; ty <= maxTy; ty++) {
+      added += materializeTile(ctx, tx, ty);
+    }
+  }
+  return added;
+}
 
-  return {
-    seed,
-    width: WORLD_CONFIG.width,
-    height: WORLD_CONFIG.height,
-    grid,
-    cities,
-    stations,
-  };
+/** 由存檔的圖磚清單重建世界（讀檔用）。 */
+export function materializeTileList(ctx: MaterializeContext, keys: readonly string[]): void {
+  for (const key of keys) {
+    const parsed = parseTileKey(key);
+    if (parsed) {
+      materializeTile(ctx, parsed.tx, parsed.ty);
+    }
+  }
+}
+
+function unlockLevelForPosition(startCore: Point, position: Point): number {
+  const tiers = CITY_UNLOCK_TIERS;
+  const d = dist(startCore, position);
+  if (d <= tiers.radius1) {
+    return tiers.levels[0] as number;
+  }
+  if (d <= tiers.radius2) {
+    return tiers.levels[1] as number;
+  }
+  if (d <= tiers.radius3) {
+    return tiers.levels[2] as number;
+  }
+  if (d <= tiers.radius4) {
+    return tiers.levels[3] as number;
+  }
+  return tiers.levels[4] as number;
 }
 
 /**
- * 依與「起始核心城市」的距離指派解鎖等級（生涯模式的進度曲線）。
- * 完全由既有城市資料決定，不消耗亂數，因此不影響世界生成結果。
+ * 建立新世界：找出起始核心位置，生成起始區域的圖磚。
+ * 回傳世界與已生成的圖磚清單。
  */
-function assignUnlockLevels(cities: City[]): void {
-  const tiers = CITY_UNLOCK_TIERS;
-  const cores = cities.filter((c) => c.cityType === "capital" || c.cityType === "port");
-  let startCore: City | null = null;
-  let bestCount = -1;
-  for (const core of cores) {
-    const count = cities.filter(
-      (c) => c.id !== core.id && dist(c.position, core.position) <= tiers.radius1,
-    ).length;
-    if (count > bestCount) {
-      bestCount = count;
-      startCore = core;
-    }
-  }
-  if (!startCore) {
-    return;
-  }
-  for (const city of cities) {
-    if (city.id === startCore.id) {
-      city.unlockLevel = tiers.levels[0] as number;
-      city.unlocked = true;
-      continue;
-    }
-    const d = dist(city.position, startCore.position);
-    const level =
-      d <= tiers.radius1
-        ? (tiers.levels[0] as number)
-        : d <= tiers.radius2
-          ? (tiers.levels[1] as number)
-          : d <= tiers.radius3
-            ? (tiers.levels[2] as number)
-            : d <= tiers.radius4
-              ? (tiers.levels[3] as number)
-              : (tiers.levels[4] as number);
-    city.unlockLevel = level;
-    city.unlocked = level === 0;
-  }
+export function generateWorld(
+  seed: number,
+  style: GeographyChoice = "auto",
+): { world: World; materializedTiles: string[] } {
+  const mapStyle: MapStyle = style === "auto" ? "auto" : style;
+  const sampler: TerrainSampler = createTerrainSampler(seed, mapStyle);
+  const startCore = findLandNear(sampler, { x: 0, y: 0 }, 900) ?? { x: 0, y: 0 };
+  const world: World = {
+    seed,
+    style,
+    startCore,
+    cities: [],
+    stations: [],
+  };
+  const tiles = new Set<string>();
+  const ctx: MaterializeContext = { world, tiles, freeUnlock: false };
+  materializeTilesAround(ctx, startCore.x, startCore.y, WORLD_CONFIG.startRadiusTiles);
+  return { world, materializedTiles: [...tiles] };
 }
 
-/** 將 Placement.assignedType 留空的衛星城市補上型別（遠距城市使用遠距權重）。 */
-function pickTypeForPlacement(rng: Rng, placement: Placement): CityType {
-  return placement.kind === "remote"
-    ? pickRemoteType(rng)
-    : pickSatelliteType(rng, placement.terrain);
-}
-
-const STATION_SUFFIX = "站";
-
-function takeName(
-  cityType: CityType,
-  pool: readonly string[],
-  capitalPool: readonly string[],
-  used: Set<string>,
-  index: number,
-): string {
-  const preferCapital = cityType === "capital" || cityType === "port";
-  const primary = preferCapital ? capitalPool : pool;
-  for (const name of primary) {
-    if (!used.has(name)) {
-      used.add(name);
-      return name;
-    }
-  }
-  for (const name of pool) {
-    if (!used.has(name)) {
-      used.add(name);
-      return name;
-    }
-  }
-  const fallback = `新城${index + 1}`;
-  used.add(fallback);
-  return fallback;
-}
-
-function idFor(prefix: string, index: number): string {
-  return `${prefix}-${String(index + 1).padStart(2, "0")}`;
-}
-
-function roundTo(value: number, step: number): number {
-  return Math.round(value / step) * step;
-}
+/* ------------------------------ 查詢工具 ------------------------------ */
 
 /** 依 ID 取得城市。 */
 export function cityById(world: World, id: ID): City | undefined {
@@ -341,4 +325,8 @@ export function stationById(world: World, id: ID): Station | undefined {
 /** 城市顯示名稱（含市／鎮後綴）。 */
 export function cityDisplayName(city: City): string {
   return `${city.name}${CITY_TYPE_PARAMS[city.cityType].suffix}`;
+}
+
+function roundTo(value: number, step: number): number {
+  return Math.round(value / step) * step;
 }

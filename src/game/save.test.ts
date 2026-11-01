@@ -16,6 +16,7 @@ import { addStop, confirmDraft, createDraft, routeGeometrics } from "./routes.ts
 import { assignTrainToRoute, purchaseTrain } from "./trains.ts";
 import { stepMinute } from "./simulation.ts";
 import { upgradeStation } from "./stations.ts";
+import { materializeTile } from "../world/worldgen.ts";
 
 const SEED = 20261030;
 
@@ -46,11 +47,26 @@ function stationIdOf(state: GameState, cityId: ID): ID {
 }
 
 function withRoute(state: GameState): GameState {
-  // 生涯模式中並非所有城市都已解鎖，這裡只使用已解鎖的城市。
+  // 生涯模式中並非所有城市都已解鎖；選擇距離最近的一對已解鎖城市，
+  // 確保測試路線在起始資金內可完成。
   const unlocked = state.world.cities.filter((c) => c.unlocked);
   const a = unlocked[0];
-  const b = unlocked[2] ?? unlocked[1];
-  if (!a || !b) {
+  if (!a) {
+    throw new Error("城市不足");
+  }
+  let b = unlocked[1];
+  let best = Number.POSITIVE_INFINITY;
+  for (const candidate of unlocked.slice(1)) {
+    const d = Math.hypot(
+      candidate.position.x - a.position.x,
+      candidate.position.y - a.position.y,
+    );
+    if (d < best) {
+      best = d;
+      b = candidate;
+    }
+  }
+  if (!b) {
     throw new Error("城市不足");
   }
   const draft = createDraft("#4f8ef7");
@@ -156,48 +172,43 @@ describe("存檔與讀檔", () => {
     expect(decodedRoute?.departureSlots).toEqual(route.departureSlots);
   });
 
-  it("v1（Phase 1）存檔可升級：缺少的欄位套用預設值", () => {
+  it("舊版地圖系統（v1–v3）存檔會被明確拒絕，不會白屏", () => {
     const state = withRoute(createNewGame(SEED, "free"));
     const payload = buildPayload(state) as unknown as Record<string, unknown>;
-    // 模擬 Phase 1 的存檔內容。
-    payload["saveVersion"] = 1;
-    delete payload["clock"];
-    delete payload["trains"];
-    delete payload["depotCostPending"];
-    delete payload["mode"];
-    delete payload["stats"];
-    delete payload["finance"];
-    delete payload["research"];
-    delete payload["events"];
-    delete payload["mission"];
-    delete payload["notifications"];
-    delete payload["cities"];
-    delete payload["stations"];
-    const routes = payload["routes"] as Array<Record<string, unknown>>;
-    for (const route of routes) {
-      delete route["departureSlots"];
-      delete route["opsCostPending"];
-      delete route["stats"];
-    }
+    payload["saveVersion"] = 3;
     const decoded = decodeSave(payload);
+    expect(decoded.ok).toBe(false);
+    if (!decoded.ok) {
+      expect(decoded.error).toContain("舊版");
+    }
+  });
+
+  it("探索的圖磚清單會隨存檔保留，載入後城市完全一致", () => {
+    const state = createNewGame(SEED, "free");
+    // 模擬探索兩個額外圖磚。
+    const before = state.world.cities.length;
+    const ctx = {
+      world: state.world,
+      tiles: new Set(state.materializedTiles),
+      freeUnlock: true,
+    };
+    materializeTile(ctx, 9, -4);
+    materializeTile(ctx, 10, -4);
+    state.materializedTiles = [...ctx.tiles];
+    expect(state.world.cities.length).toBeGreaterThanOrEqual(before);
+
+    const decoded = decodeSave(JSON.parse(encodeSave(state)) as unknown);
     expect(decoded.ok).toBe(true);
     if (!decoded.ok) {
       return;
     }
-    expect(decoded.state.saveVersion).toBe(SAVE_VERSION);
-    expect(decoded.state.clock).toEqual({ minutes: 0, speed: 0 });
-    expect(decoded.state.trains.length).toBe(0);
-    expect(decoded.state.depotCostPending).toBe(0);
-    expect(decoded.state.routes[0]?.departureSlots).toEqual([0, 0]);
-    expect(decoded.state.routes[0]?.opsCostPending).toBe(0);
-    expect(decoded.state.routes.length).toBe(1);
-    // v1 存檔預設以自由模式載入（當時所有城市皆已解鎖）。
-    expect(decoded.state.mode).toBe("free");
-    expect(decoded.state.stats.totalServed).toBe(0);
-    expect(decoded.state.research.completed.train).toBe(0);
+    expect(decoded.state.materializedTiles.length).toBe(state.materializedTiles.length);
+    expect(decoded.state.world.cities.length).toBe(state.world.cities.length);
+    expect(decoded.state.world.cities).toEqual(state.world.cities);
+    expect(decoded.state.world.startCore).toEqual(state.world.startCore);
   });
 
-  it("v3 存檔會保留公司統計、財務、研究、事件、任務與車站升級", () => {
+  it("v4 存檔會保留公司統計、財務、研究、事件、任務與車站升級", () => {
     const state = withRoute(createNewGame(SEED, "career"));
     // 車站升級。
     const stationId = state.world.cities[0] ? stationIdOf(state, state.world.cities[0].id) : null;

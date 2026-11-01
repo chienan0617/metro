@@ -4,6 +4,8 @@ import { formatDistance, formatMoney, formatPopulation } from "../../core/format
 import type { GameState, ID } from "../../core/types.ts";
 import { CITY_TYPE_PARAMS, ROUTE_CONFIG } from "../../game/config.ts";
 import { stationEffectiveCapacity, stationUpgradeCost } from "../../game/stations.ts";
+import { BIOME_LABELS, biomeClimateLabel } from "../../world/biomes.ts";
+import { samplerForWorld } from "../../world/terrain.ts";
 import { cityDisplayName } from "../../world/worldgen.ts";
 import { INDUSTRY_COLORS, INDUSTRY_LABELS, TERRAIN_LABELS } from "../palette.ts";
 import { el } from "../dom.ts";
@@ -37,6 +39,9 @@ export function renderCityPanel(
   const stats = el("div", { class: "stat-grid" });
   stats.appendChild(statRow("人口", formatPopulation(city.population)));
   stats.appendChild(statRow("地形", TERRAIN_LABELS[city.terrain]));
+  stats.appendChild(statRow("生態域", BIOME_LABELS[city.biome]));
+  const climateSample = samplerForWorld(state.world).sampleAt(city.position);
+  stats.appendChild(statRow("氣候", biomeClimateLabel(climateSample)));
   stats.appendChild(statRow("發展等級", "★".repeat(city.developmentLevel)));
   stats.appendChild(statRow("交通需求倍率", `×${city.demandMultiplier.toFixed(2)}`));
   stats.appendChild(statRow("年成長率", `+${(city.growthRate * 100).toFixed(1)}%`));

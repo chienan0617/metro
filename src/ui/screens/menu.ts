@@ -26,11 +26,9 @@ export interface MenuOptions {
 }
 
 const MAP_STYLE_OPTIONS: ReadonlyArray<{ value: GeographyChoice; label: string; hint: string }> = [
-  { value: "auto", label: "自動", hint: "依地圖種子決定地理樣式" },
-  { value: "continent", label: "內陸大陸", hint: "廣闊內陸，僅有湖泊與內灣" },
-  { value: "mainland", label: "大陸海岸", hint: "單側海洋、內陸延伸至地圖邊緣" },
-  { value: "strait", label: "海峽雙陸", hint: "兩塊大陸隔著海峽" },
-  { value: "island", label: "海島", hint: "四面環海的大陸" },
+  { value: "auto", label: "自動", hint: "依地圖種子混合大陸與海洋" },
+  { value: "continent", label: "大陸（廣闊內陸）", hint: "大片內陸，山脈、湖泊與多樣生態域" },
+  { value: "islands", label: "群島", hint: "海洋較多，島嶼與港灣散布" },
 ];
 
 export function showMenu(root: HTMLElement, options: MenuOptions): void {
@@ -230,7 +228,7 @@ export function showMenu(root: HTMLElement, options: MenuOptions): void {
     "div",
     { class: "menu-center" },
     card,
-    el("div", { class: "menu-footer", text: `${STUDIO_NAME} · v1.0 · 完整營運系統` }),
+    el("div", { class: "menu-footer", text: `${STUDIO_NAME} · v2.0 · 無限世界與生態域` }),
   );
   screen.appendChild(center);
   root.appendChild(screen);

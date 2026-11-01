@@ -22,7 +22,8 @@ export function createNewGame(
   options?: NewGameOptions,
 ): GameState {
   const geoStyle: GeographyChoice = options?.geoStyle ?? "auto";
-  const world = generateWorld(seed, geoStyle);
+  const generated = generateWorld(seed, geoStyle);
+  const world = generated.world;
   if (mode === "free") {
     for (const city of world.cities) {
       city.unlocked = true;
@@ -35,6 +36,7 @@ export function createNewGame(
     geoStyle,
     createdAt: Date.now(),
     world,
+    materializedTiles: generated.materializedTiles,
     player: {
       companyName: options?.companyName ?? DEFAULT_COMPANY_NAME,
       money: mode === "free" ? ECONOMY_CONFIG.freeStartingMoney : ECONOMY_CONFIG.startingMoney,

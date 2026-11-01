@@ -5,8 +5,8 @@
  */
 
 import { dist } from "../core/math.ts";
-import type { City, GameState, ID } from "../core/types.ts";
-import { DEMAND_CONFIG, FARE_CONFIG, XP_PER_PASSENGER } from "./config.ts";
+import type { City, GameState, ID, Point } from "../core/types.ts";
+import { DEMAND_CONFIG, FARE_CONFIG, WORLD_CONFIG, XP_PER_PASSENGER } from "./config.ts";
 import { eventDemandMultiplier } from "./events.ts";
 import { buildNetwork, findPathsFrom } from "./network.ts";
 import { applyXp } from "./progression.ts";
@@ -99,7 +99,9 @@ export function runHourlyDemand(state: GameState): HourlyDemandReport {
     route.stats.capacityToday += routeCapacity;
   }
 
-  const origins = state.world.cities.filter((c) => c.unlocked || state.mode === "free");
+  // 無限世界效能保護：城市太多時只模擬路網周邊範圍。
+  const simulatedCities = limitSimulationCities(state);
+  const origins = simulatedCities.filter((c) => c.unlocked || state.mode === "free");
   let generated = 0;
   let servedTotal = 0;
   let revenueTotal = 0;
@@ -110,7 +112,7 @@ export function runHourlyDemand(state: GameState): HourlyDemandReport {
       continue;
     }
     const paths = findPathsFrom(graph, originStationId);
-    for (const destination of state.world.cities) {
+    for (const destination of simulatedCities) {
       if (destination.id === origin.id) {
         continue;
       }
@@ -195,6 +197,38 @@ export function runHourlyDemand(state: GameState): HourlyDemandReport {
     unserved: generated - servedTotal,
     revenue: revenueTotal,
   };
+}
+
+/**
+ * 需求模擬的城市集合。
+ * 城市數量在保護值內時全部模擬；超過時以「路網中心（或起始核心）」為準，
+ * 只模擬一定半徑內的城市，避免無限探索造成計算量爆炸。
+ */
+function limitSimulationCities(state: GameState): City[] {
+  const cities = state.world.cities;
+  if (cities.length <= WORLD_CONFIG.maxSimulationCities) {
+    return cities;
+  }
+  let center: Point = state.world.startCore;
+  let count = 0;
+  let sumX = 0;
+  let sumY = 0;
+  for (const route of state.routes) {
+    for (const stationId of route.stationIds) {
+      const station = state.world.stations.find((s) => s.id === stationId);
+      if (station) {
+        sumX += station.position.x;
+        sumY += station.position.y;
+        count++;
+      }
+    }
+  }
+  if (count > 0) {
+    center = { x: sumX / count, y: sumY / count };
+  }
+  return cities
+    .filter((c) => dist(c.position, center) <= WORLD_CONFIG.simulationRadius)
+    .slice(0, WORLD_CONFIG.maxSimulationCities);
 }
 
 function recordBoarding(state: GameState, stationId: ID, count: number): void {

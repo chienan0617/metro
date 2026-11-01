@@ -10,6 +10,12 @@
   --panel-raised: #16283a;
   --line: #1d2f40;
   --line-soft: rgba(255, 255, 255, 0.06);
+  /* 毛玻璃（frosted glass）表面 */
+  --glass: rgba(13, 24, 36, 0.66);
+  --glass-strong: rgba(11, 21, 31, 0.82);
+  --glass-border: rgba(255, 255, 255, 0.09);
+  --glass-blur: blur(16px) saturate(1.3);
+  --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   --text: #e6eef7;
   --muted: #93a9bd;
   --muted-2: #6d8296;
@@ -421,8 +427,12 @@ button {
   gap: 12px;
   height: 52px;
   padding: 0 14px;
-  background: linear-gradient(180deg, rgba(10, 20, 29, 0.99), rgba(10, 20, 29, 0.92));
-  border-bottom: 1px solid var(--line);
+  padding-top: env(safe-area-inset-top);
+  background: var(--glass-strong);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-bottom: 1px solid var(--glass-border);
+  box-shadow: var(--glass-highlight);
   z-index: 20;
 }
 
@@ -595,8 +605,11 @@ button {
   flex-direction: column;
   gap: 8px;
   padding: 12px 10px;
-  background: var(--panel-solid);
-  border-right: 1px solid var(--line);
+  background: var(--glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-right: 1px solid var(--glass-border);
+  box-shadow: var(--glass-highlight);
   z-index: 15;
 }
 
@@ -676,8 +689,11 @@ button {
 .sidepanel {
   width: var(--sidepanel-width, 336px);
   flex: 0 0 auto;
-  background: var(--panel-solid);
-  border-left: 1px solid var(--line);
+  background: var(--glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-left: 1px solid var(--glass-border);
+  box-shadow: var(--glass-highlight);
   overflow-y: auto;
   z-index: 15;
 }
@@ -767,11 +783,24 @@ button {
   gap: 12px;
   height: 34px;
   padding: 0 14px;
+  padding-bottom: env(safe-area-inset-bottom);
   font-size: 12px;
   color: var(--muted);
-  border-top: 1px solid var(--line);
-  background: var(--panel-solid);
+  border-top: 1px solid var(--glass-border);
+  background: var(--glass-strong);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   z-index: 20;
+}
+
+/* 不支援 backdrop-filter 時退回不透明表面。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .topbar,
+  .toolbar,
+  .sidepanel,
+  .statusbar {
+    background: var(--panel-solid);
+  }
 }
 
 .statusbar-hint {
@@ -1523,12 +1552,20 @@ select.text-input {
   width: min(440px, calc(100vw - 40px));
   max-height: calc(100vh - 60px);
   overflow-y: auto;
-  background: #101c29;
-  border: 1px solid var(--line);
+  background: var(--glass-strong);
+  backdrop-filter: blur(20px) saturate(1.3);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  border: 1px solid var(--glass-border);
   border-radius: 16px;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow), var(--glass-highlight);
   padding: 22px;
   animation: modalIn 0.22s ease both;
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .modal {
+    background: #101c29;
+  }
 }
 
 @keyframes modalIn {
@@ -2094,6 +2131,58 @@ body.reduce-motion *::after {
 
   .mini-pill .mini-label {
     display: none;
+  }
+
+  /* 抽屜握把（視覺提示可上滑/下滑）。 */
+  .screen.game.narrow-panel .sidepanel::before {
+    content: "";
+    display: block;
+    width: 44px;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.22);
+    margin: 8px auto 2px;
+  }
+}
+
+/* 觸控裝置：放大點擊目標。 */
+@media (pointer: coarse) {
+  .icon-btn {
+    width: 34px;
+    height: 34px;
+  }
+
+  .icon-btn.small {
+    width: 30px;
+    height: 30px;
+  }
+
+  .color-dot {
+    width: 26px;
+    height: 26px;
+  }
+
+  .chip {
+    padding: 5px 11px;
+  }
+
+  .speed-btn {
+    min-width: 38px;
+    height: 30px;
+  }
+
+  .map-control-btn {
+    width: 40px;
+    height: 40px;
+  }
+
+  .panel-tab {
+    width: 26px;
+    height: 60px;
+  }
+
+  .btn {
+    padding: 11px 16px;
   }
 }
 

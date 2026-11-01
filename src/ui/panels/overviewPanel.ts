@@ -7,7 +7,8 @@ import { activeEventsLabels } from "../../game/events.ts";
 import { xpForNextLevel } from "../../game/progression.ts";
 import { currentDay } from "../../game/events.ts";
 import { cityDisplayName, stationById } from "../../world/worldgen.ts";
-import { CITY_COLORS, TERRAIN_CSS, TERRAIN_LABELS } from "../palette.ts";
+import { CITY_COLORS } from "../palette.ts";
+import { BIOME_LABELS, BIOME_RGB } from "../../world/biomes.ts";
 import { el } from "../dom.ts";
 import { chip, emptyCard, infoNote, sectionTitle, statRow } from "./kit.ts";
 
@@ -143,7 +144,7 @@ export function renderOverviewPanel(
     dot.style.background = color;
   }
   const terrainGrid = el("div", { class: "legend-grid" });
-  for (const [terrain, label] of Object.entries(TERRAIN_LABELS)) {
+  for (const [biome, label] of Object.entries(BIOME_LABELS)) {
     terrainGrid.appendChild(
       el(
         "span",
@@ -153,7 +154,8 @@ export function renderOverviewPanel(
       ),
     );
     const dot = terrainGrid.lastElementChild?.querySelector(".legend-dot") as HTMLElement;
-    dot.style.background = TERRAIN_CSS[terrain as keyof typeof TERRAIN_CSS];
+    const rgb = BIOME_RGB[biome as keyof typeof BIOME_RGB];
+    dot.style.background = `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
   }
   container.appendChild(legendGrid);
   container.appendChild(terrainGrid);

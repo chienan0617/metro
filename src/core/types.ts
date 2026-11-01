@@ -21,11 +21,28 @@ export type RouteStatus = "planning" | "building" | "active" | "suspended";
 /** 遊戲模式：生涯（任務與解鎖）或自由經營。 */
 export type GameMode = "career" | "free";
 
-/** 地理樣式：內陸大陸、海島、大陸海岸、海峽雙陸。 */
-export type GeographyStyle = "continent" | "island" | "mainland" | "strait";
+/** 地理樣式：大陸（廣闊內陸）或群島（海洋較多）。 */
+export type GeographyStyle = "continent" | "islands";
 
 /** 地理選擇：依種子自動決定，或由玩家指定。 */
 export type GeographyChoice = GeographyStyle | "auto";
+
+/** 生態域（由溫度、濕度與高度決定）。 */
+export type BiomeId =
+  | "deep_ocean"
+  | "ocean"
+  | "beach"
+  | "plains"
+  | "forest"
+  | "jungle"
+  | "savanna"
+  | "desert"
+  | "swamp"
+  | "taiga"
+  | "snow"
+  | "hills"
+  | "mountain"
+  | "peaks";
 
 /** 各路線的營運統計（今日與累計）。 */
 export interface RouteStats {
@@ -200,6 +217,8 @@ export interface City {
   demandMultiplier: number;
   growthRate: number;
   terrain: TerrainType;
+  /** 城市所在的生態域。 */
+  biome: BiomeId;
   developmentLevel: number;
   unlocked: boolean;
   /** 生涯模式中需要達到的公司等級（0 = 一開始即可用）。 */
@@ -297,21 +316,16 @@ export interface LedgerEntry {
   createdAt: number;
 }
 
-/** 地形格線資料。以 Uint8Array 儲存地形索引（對應地形種類列舉順序）。 */
-export interface TerrainGrid {
-  width: number;
-  height: number;
-  cellSize: number;
-  cols: number;
-  rows: number;
-  data: Uint8Array;
-}
-
+/**
+ * 無限世界：地形由柏林雜訊程序化生成（不儲存格線），
+ * 城市以「圖磚」為單位在玩家探索時逐步生成（materializedTiles 記錄已生成區域）。
+ */
 export interface World {
   seed: number;
-  width: number;
-  height: number;
-  grid: TerrainGrid;
+  style: GeographyChoice;
+  /** 起始核心城市的位置（解鎖分級與「回到起始區」使用）。 */
+  startCore: Point;
+  /** 已生成的城市與車站（隨探索增加，內容由 seed 決定、永久穩定）。 */
   cities: City[];
   stations: Station[];
 }
@@ -339,6 +353,8 @@ export interface GameState {
   geoStyle: GeographyChoice;
   createdAt: number;
   world: World;
+  /** 已生成的圖磚（"x,y"，隨探索累積）。 */
+  materializedTiles: string[];
   player: PlayerState;
   clock: ClockState;
   routes: Route[];

@@ -22,7 +22,7 @@ export function createStatusbar(
   onToast?: (kind: ToastKind, message: string) => void,
 ): Statusbar {
   const hint = el("span", { class: "statusbar-hint", text: "" });
-  const phase = el("span", { class: "phase-chip", text: "v1.0 · 完整營運" });
+  const phase = el("span", { class: "phase-chip", text: "v2.0 · 無限世界" });
   const root = el("footer", { class: "statusbar" }, hint, phase);
 
   const toasts = el("div", { class: "toasts" });

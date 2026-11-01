@@ -5,56 +5,36 @@
 
 import type { CityType, EventKind, IndustryMix, TerrainType } from "../core/types.ts";
 
-export const SAVE_VERSION = 3;
+export const SAVE_VERSION = 4;
 
 /** 預設地圖種子（固定，確保每位玩家第一次遊玩的區域一致）。 */
 export const DEFAULT_SEED = 20261030;
 
+/**
+ * 無限世界設定：世界不設邊界，地形由柏林雜訊程序化生成，
+ * 城市以「圖磚」為單位在玩家探索時生成。
+ */
 export const WORLD_CONFIG = {
-  width: 7200,
-  height: 4800,
-  cellSize: 36,
-  /** 城市群（區域）數量。 */
-  regionCount: 10,
-  /** 城市之間的最小距離（世界單位）。 */
-  minCityDistance: 220,
-  /** 城市與地圖邊界的最小距離。 */
-  borderMargin: 340,
-  /** 每個區域的衛星城市數量範圍。 */
-  satellitesPerRegion: [2, 4] as const,
-  /** 區域核心城市之間的最小距離。 */
-  minCoreDistance: 1000,
-  /** 衛星城市與核心城市的距離範圍。 */
-  satelliteDistance: [260, 620] as const,
-  /** 遠距城市與其他城市的最小距離。 */
-  remoteMinDistance: 800,
-  /** 遠距城市填充目標（總城市數上限由 cityCountRange 控制）。 */
-  remoteTarget: 46,
-  /** 城市總數目標範圍（生成後檢查）。 */
-  cityCountRange: [32, 52] as const,
-  noiseOctaves: 4,
-  noiseFrequency: 3.4,
-  noisePersistence: 0.52,
-  /**
-   * 地理樣式權重：內陸大陸、海島、大陸海岸、海峽雙陸。
-   * 由 seed 決定，同一 seed 產生相同地理（玩家也可在選單直接指定）。
-   */
-  geographyWeights: { continent: 0.34, island: 0.2, mainland: 0.28, strait: 0.18 },
-  /** 內陸湖泊：次要雜訊高於門檻且高度適中時形成湖泊。 */
-  lakeThreshold: 0.8,
-  lakeMinElevation: 0.4,
-  lakeMaxElevation: 0.6,
-  /** 地形重新嘗試的陸地比例下限（避免極端地形讓城市無法放置）。 */
-  minLandRatio: 0.38,
-  terrainAttempts: 3,
-} as const;
-
-/** 地形分類門檻（依高度值）。 */
-export const TERRAIN_THRESHOLDS = {
-  water: 0.3,
-  coast: 0.365,
-  plain: 0.62,
-  hill: 0.79,
+  /** 圖磚大小（世界單位 ≈ 公里）。 */
+  tileSize: 1400,
+  /** 起始區域生成的圖磚半徑（2 = 5×5 塊）。 */
+  startRadiusTiles: 2,
+  /** 相機探索時生成圖磚的半徑。 */
+  discoveryRadiusTiles: 1,
+  /** 單一圖磚最多城市數。 */
+  maxCitiesPerTile: 3,
+  /** 每塊圖磚的城市數範圍（乘上陸地比例後四捨五入）。 */
+  citiesPerTileRange: [1.2, 3.4] as const,
+  /** 圖磚內距比例，讓相鄰圖磚的城市自然保持距離。 */
+  tileInsetRatio: 0.3,
+  /** 同一圖磚內城市的最小距離。 */
+  minCityDistance: 330,
+  /** 起始區域城市數的合理範圍（測試用）。 */
+  cityCountRange: [12, 80] as const,
+  /** 無限世界的效能保護：每小時模擬的城市上限。 */
+  maxSimulationCities: 160,
+  /** 需求模擬的半徑（以此範圍內的城市為主）。 */
+  simulationRadius: 2400,
 } as const;
 
 /** 各地形的路線建設成本倍率。 */
@@ -166,10 +146,10 @@ export const XP_PER_PASSENGER = 0.12;
 
 /** 城市解鎖等級（依與起始核心城市的距離分級）。 */
 export const CITY_UNLOCK_TIERS = {
-  radius1: 700,
-  radius2: 1_300,
-  radius3: 1_900,
-  radius4: 2_600,
+  radius1: 1_100,
+  radius2: 2_100,
+  radius3: 3_200,
+  radius4: 4_600,
   levels: [0, 2, 3, 4, 5] as readonly number[],
 } as const;
 

@@ -1,6 +1,6 @@
 /**
- * 存檔與讀檔系統。
- * 存檔只保存「種子 + 玩家變更」，世界由種子重新生成，確保一致性並縮小存檔。
+ * 存檔與讀檔系統（v4，無限世界）。
+ * 存檔保存「種子 + 已探索圖磚 + 玩家變更」；世界由種子與圖磚清單重建，永久一致。
  * 存取介面抽象化，遊戲邏輯不依賴特定儲存實作。
  */
 
@@ -46,11 +46,15 @@ import {
   ECONOMY_CONFIG,
   ROUTE_CONFIG,
   SAVE_VERSION,
-  TERRAIN_THRESHOLDS,
   WORLD_CONFIG,
 } from "./config.ts";
 import { routeGeometrics } from "./routes.ts";
 import { trainModelById } from "./trainModels.ts";
+import {
+  materializeTileList,
+  parseTileKey,
+  type MaterializeContext,
+} from "../world/worldgen.ts";
 
 export const SAVE_KEY = "metro-network-tycoon/save";
 
@@ -103,6 +107,8 @@ export interface SavePayload {
   seed: number;
   mode: GameMode;
   geoStyle: GeographyChoice;
+  /** 已探索的圖磚（無限世界的城市重建依據）。 */
+  materializedTiles: string[];
   createdAt: number;
   savedAt: number;
   player: PlayerState;
@@ -129,7 +135,6 @@ export function computeConfigHash(): string {
   return hashString(
     JSON.stringify({
       world: WORLD_CONFIG,
-      thresholds: TERRAIN_THRESHOLDS,
       cityTypes: CITY_TYPE_PARAMS,
       unlockTiers: CITY_UNLOCK_TIERS,
       economy: { trackCostPerUnit: ECONOMY_CONFIG.trackCostPerUnit },
@@ -145,6 +150,7 @@ export function buildPayload(state: GameState): SavePayload {
     seed: state.seed,
     mode: state.mode,
     geoStyle: state.geoStyle,
+    materializedTiles: state.materializedTiles.slice(),
     createdAt: state.createdAt,
     savedAt: Date.now(),
     player: { ...state.player },
@@ -231,9 +237,12 @@ export function decodeSave(raw: unknown): DecodeResult {
   if (typeof version !== "number") {
     return { ok: false, error: "存檔缺少版本資訊" };
   }
-  // v1 / v2 存檔可以升級：缺少的欄位會套用預設值。
-  if (version !== 1 && version !== 2 && version !== SAVE_VERSION) {
-    return { ok: false, error: `存檔版本不相容（存檔 v${version}，目前 v${SAVE_VERSION}）` };
+  // 無限世界（v4）與舊版地圖系統不相容，舊存檔需要重新開始。
+  if (version !== SAVE_VERSION) {
+    return {
+      ok: false,
+      error: `存檔版本不相容（存檔 v${version}，目前 v${SAVE_VERSION}）；v1–v3 為舊版地圖系統，請開始新遊戲`,
+    };
   }
   if (raw["configHash"] !== computeConfigHash()) {
     return { ok: false, error: "地圖設定已更新，此存檔無法繼續使用" };
@@ -249,21 +258,19 @@ export function decodeSave(raw: unknown): DecodeResult {
 
   const geoStyleRaw = raw["geoStyle"];
   const geoStyle: GeographyChoice =
-    geoStyleRaw === "continent" ||
-    geoStyleRaw === "island" ||
-    geoStyleRaw === "mainland" ||
-    geoStyleRaw === "strait" ||
-    geoStyleRaw === "auto"
+    geoStyleRaw === "continent" || geoStyleRaw === "islands" || geoStyleRaw === "auto"
       ? geoStyleRaw
       : "auto";
 
+  const generated = generateWorld(seed, geoStyle);
   const state: GameState = {
     saveVersion: SAVE_VERSION,
     seed,
     mode,
     geoStyle,
     createdAt: numberOr(raw["createdAt"], Date.now()),
-    world: generateWorld(seed, geoStyle),
+    world: generated.world,
+    materializedTiles: [],
     player: decodePlayer(raw["player"]),
     clock: decodeClock(raw["clock"]),
     routes: [],
@@ -280,6 +287,28 @@ export function decodeSave(raw: unknown): DecodeResult {
     ledger: decodeLedger(raw["ledger"]),
     counters: { route: 0, train: 0, ledger: 0 },
   };
+
+  // 重建已探索的圖磚（城市必須先存在，才能驗證路線與列車）。
+  const tiles = new Set<string>(generated.materializedTiles);
+  const materializeCtx: MaterializeContext = {
+    world: state.world,
+    tiles,
+    freeUnlock: mode === "free",
+  };
+  const savedTiles = raw["materializedTiles"];
+  if (Array.isArray(savedTiles)) {
+    const validKeys: string[] = [];
+    for (const key of savedTiles) {
+      if (typeof key === "string" && parseTileKey(key) !== null) {
+        validKeys.push(key);
+      }
+      if (validKeys.length >= 6000) {
+        break; // 防禦：異常大的清單不予處理。
+      }
+    }
+    materializeTileList(materializeCtx, validKeys);
+  }
+  state.materializedTiles = [...tiles];
 
   applyWorldOverrides(state, raw);
 

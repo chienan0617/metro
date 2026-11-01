@@ -19,13 +19,7 @@ export interface AppSettings {
 
 const SETTINGS_KEY = "metro-network-tycoon/settings";
 
-const GEO_CHOICES: readonly GeographyChoice[] = [
-  "auto",
-  "continent",
-  "island",
-  "mainland",
-  "strait",
-];
+const GEO_CHOICES: readonly GeographyChoice[] = ["auto", "continent", "islands"];
 
 export const DEFAULT_SETTINGS: AppSettings = {
   sound: true,

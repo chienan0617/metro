@@ -7,8 +7,8 @@ import { dist } from "../core/math.ts";
 import { emptyRouteStats } from "../core/types.ts";
 import type { GameState, ID, Route, Station } from "../core/types.ts";
 import { researchMultipliers } from "./research.ts";
+import { samplerForWorld, sampleTerrainMultiplier } from "../world/terrain.ts";
 import { cityById, stationById } from "../world/worldgen.ts";
-import { sampleTerrainMultiplier } from "../world/terrain.ts";
 import {
   BUILD_TYPE_MULTIPLIER,
   ECONOMY_CONFIG,
@@ -97,7 +97,8 @@ export function stationDistance(state: GameState, aId: ID, bId: ID): number {
 /** 單一路段的建設成本。 */
 export function segmentCost(state: GameState, a: Station, b: Station): SegmentPreview {
   const distance = dist(a.position, b.position);
-  const terrainMultiplier = sampleTerrainMultiplier(state.world.grid, a.position, b.position);
+  const sampler = samplerForWorld(state.world);
+  const terrainMultiplier = sampleTerrainMultiplier(sampler.terrainAt, a.position, b.position);
   const cost =
     ECONOMY_CONFIG.trackCostPerUnit *
     distance *
