@@ -8,6 +8,7 @@ import { clamp } from "../../core/math.ts";
 import type { City, GameState, ID, Point, Route, Station, World } from "../../core/types.ts";
 import { samplerForWorld, type TerrainSampler } from "../../world/terrain.ts";
 import { BIOME_RGB } from "../../world/biomes.ts";
+import { BiomeChunkCache, FAR_LEVEL, NEAR_LEVEL } from "./biomeCache.ts";
 import { cityDisplayName } from "../../world/worldgen.ts";
 import { CITY_COLORS, MAP_BACKGROUND } from "../palette.ts";
 import { Camera } from "./camera.ts";
@@ -60,11 +61,12 @@ export class MapView {
     selectedRouteId: null,
     draft: null,
   };
-  /** 無限地形：以視窗解析度即時取樣生態域，相機變動時才重算。 */
+  /** 無限地形：快速底層（低解析視窗取樣）＋銳利圖磚快取。 */
   private sampler: TerrainSampler | null = null;
   private biomeCanvas: HTMLCanvasElement | null = null;
   private biomeImage: ImageData | null = null;
   private terrainDirty = true;
+  private chunkCache = new BiomeChunkCache();
 
   hoverCityId: ID | null = null;
   private hoverRouteId: ID | null = null;
@@ -124,6 +126,7 @@ export class MapView {
     this.cityMap = new Map(world.cities.map((c) => [c.id, c]));
     this.stationMap = new Map(world.stations.map((s) => [s.id, s]));
     this.sampler = samplerForWorld(world);
+    this.chunkCache.clear();
     this.camera = new Camera(world.startCore.x, world.startCore.y, 0.24);
     this.handleResize();
     this.terrainDirty = true;
@@ -408,17 +411,73 @@ export class MapView {
     if (!this.sampler || !this.world) {
       return;
     }
+    // 快速底層：保證任何時刻都有畫面。
     if (this.terrainDirty || this.biomeCanvas === null) {
       this.updateBiomeTerrain();
       this.terrainDirty = false;
     }
-    if (!this.biomeCanvas) {
-      return;
-    }
     const ctx = this.ctx;
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(this.biomeCanvas, 0, 0, this.biomeCanvas.width, this.biomeCanvas.height, 0, 0, this.viewW, this.viewH);
+    if (this.biomeCanvas) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(
+        this.biomeCanvas,
+        0,
+        0,
+        this.biomeCanvas.width,
+        this.biomeCanvas.height,
+        0,
+        0,
+        this.viewW,
+        this.viewH,
+      );
+    }
+
+    // 銳利圖磚：放大到一定程度後逐塊疊上高解析地形。
+    const zoom = this.camera.zoom;
+    if (zoom >= 0.2) {
+      const level = zoom >= 0.8 ? NEAR_LEVEL : FAR_LEVEL;
+      const halfW = this.viewW / 2 / zoom;
+      const halfH = this.viewH / 2 / zoom;
+      const minCx = Math.floor((this.camera.cx - halfW) / level.chunkUnits);
+      const maxCx = Math.floor((this.camera.cx + halfW) / level.chunkUnits);
+      const minCy = Math.floor((this.camera.cy - halfH) / level.chunkUnits);
+      const maxCy = Math.floor((this.camera.cy + halfH) / level.chunkUnits);
+      for (let cy = minCy; cy <= maxCy; cy++) {
+        for (let cx = minCx; cx <= maxCx; cx++) {
+          const centerX = (cx + 0.5) * level.chunkUnits;
+          const centerY = (cy + 0.5) * level.chunkUnits;
+          const priority = Math.hypot(centerX - this.camera.cx, centerY - this.camera.cy);
+          const chunk = this.chunkCache.request(level, cx, cy, priority);
+          if (!chunk) {
+            continue;
+          }
+          const topLeft = this.camera.worldToScreen({
+            x: cx * level.chunkUnits,
+            y: cy * level.chunkUnits,
+          });
+          const size = level.chunkUnits * zoom + 0.6; // 微幅重疊，避免接縫
+          ctx.drawImage(chunk, topLeft.x, topLeft.y, size, size);
+        }
+      }
+    }
+
+    // 以小時間預算分批建立圖磚（不阻塞操作）。
+    if (this.chunkCache.pendingCount > 0) {
+      this.chunkCache.buildBudget(this.sampler, 8);
+    }
+  }
+
+  /** 供外部（模擬計時器）推進圖磚建立；rAF 被節流時仍能完成快取。 */
+  pumpChunkBuild(budgetMs: number): void {
+    if (this.sampler && this.chunkCache.pendingCount > 0) {
+      this.chunkCache.buildBudget(this.sampler, budgetMs);
+    }
+  }
+
+  /** 開發除錯：地形圖磚快取狀態。 */
+  debugTerrainInfo(): { cached: number; pending: number } {
+    return { cached: this.chunkCache.cachedCount, pending: this.chunkCache.pendingCount };
   }
 
   private updateBiomeTerrain(): void {

@@ -2,15 +2,22 @@
 import type { GameState, ID } from "../core/types.ts";
 import {
   buildPayload,
-  clearSave,
+  createSaveSlot,
   decodeSave,
+  deleteSaveSlot,
   encodeSave,
-  hasSave,
-  readSave,
-  writeSave,
+  exportSaveText,
+  importSaveText,
+  installAutosave,
+  listSaveSlots,
+  migrateLegacySave,
+  readSaveSlot,
+  slotKey,
+  writeSaveSlot,
   type SaveStorage,
 } from "./save.ts";
 import { SAVE_VERSION } from "./config.ts";
+import { Store } from "../core/store.ts";
 import { createNewGame } from "./state.ts";
 import { addStop, confirmDraft, createDraft, routeGeometrics } from "./routes.ts";
 import { assignTrainToRoute, purchaseTrain } from "./trains.ts";
@@ -21,19 +28,19 @@ import { materializeTile } from "../world/worldgen.ts";
 const SEED = 20261030;
 
 class MemoryStorage implements SaveStorage {
-  private data: string | null = null;
+  private data = new Map<string, string>();
 
-  read(): string | null {
-    return this.data;
+  get(key: string): string | null {
+    return this.data.get(key) ?? null;
   }
 
-  write(value: string): boolean {
-    this.data = value;
+  set(key: string, value: string): boolean {
+    this.data.set(key, value);
     return true;
   }
 
-  remove(): void {
-    this.data = null;
+  remove(key: string): void {
+    this.data.delete(key);
   }
 }
 
@@ -340,34 +347,109 @@ describe("存檔與讀檔", () => {
     expect(decoded.state.ledger.length).toBe(0);
   });
 
-  it("透過儲存介面寫入、讀取與清除", () => {
+  it("多存檔欄位：寫入、列出、讀取與刪除互不影響", () => {
     const storage = new MemoryStorage();
-    expect(hasSave(storage)).toBe(false);
-    expect(readSave(storage)).toBeNull();
+    expect(listSaveSlots(storage)).toEqual([]);
 
-    const state = withRoute(createNewGame(SEED, "free"));
-    expect(writeSave(state, storage)).toBe(true);
-    expect(hasSave(storage)).toBe(true);
+    const stateA = withRoute(createNewGame(SEED, "free"));
+    const stateB = withRoute(createNewGame(SEED + 1, "career"));
+    const slotA = createSaveSlot();
+    const slotB = createSaveSlot();
+    expect(writeSaveSlot(slotA, stateA, storage)).toBe(true);
+    expect(writeSaveSlot(slotB, stateB, storage)).toBe(true);
 
-    const loaded = readSave(storage);
+    const slots = listSaveSlots(storage);
+    expect(slots.length).toBe(2);
+    expect(slots.map((s) => s.id).sort()).toEqual([slotA, slotB].sort());
+
+    const loadedA = readSaveSlot(slotA, storage);
+    expect(loadedA?.ok).toBe(true);
+    if (loadedA && loadedA.ok) {
+      expect(loadedA.state.seed).toBe(SEED);
+      expect(loadedA.state.routes.length).toBe(1);
+    }
+
+    deleteSaveSlot(slotB, storage);
+    expect(listSaveSlots(storage).length).toBe(1);
+    expect(readSaveSlot(slotB, storage)).toBeNull();
+    expect(readSaveSlot(slotA, storage)?.ok).toBe(true);
+  });
+
+  it("開新遊戲不會覆蓋既有存檔欄位", () => {
+    const storage = new MemoryStorage();
+    const firstSlot = createSaveSlot();
+    writeSaveSlot(firstSlot, createNewGame(SEED, "free"), storage);
+    // 再開一場新遊戲 → 另一個欄位。
+    const secondSlot = createSaveSlot();
+    writeSaveSlot(secondSlot, createNewGame(SEED + 1, "career"), storage);
+    expect(listSaveSlots(storage).length).toBe(2);
+    // 第一次的存檔內容仍然存在。
+    const first = readSaveSlot(firstSlot, storage);
+    expect(first?.ok).toBe(true);
+    if (first && first.ok) {
+      expect(first.state.seed).toBe(SEED);
+    }
+  });
+
+  it("匯入存檔一律建立新的欄位，不覆蓋現有進度", () => {
+    const storage = new MemoryStorage();
+    const existing = createSaveSlot();
+    writeSaveSlot(existing, withRoute(createNewGame(SEED, "free")), storage);
+    const exported = exportSaveText(existing, storage);
+    expect(exported).not.toBeNull();
+    const result = importSaveText(exported as string, storage);
+    expect(result.ok).toBe(true);
+    expect(listSaveSlots(storage).length).toBe(2);
+    expect(readSaveSlot(existing, storage)?.ok).toBe(true);
+    if (result.ok && result.slotId) {
+      expect(readSaveSlot(result.slotId, storage)?.ok).toBe(true);
+    }
+  });
+
+  it("舊版單一存檔會自動搬移成新欄位（保留進度）", () => {
+    const storage = new MemoryStorage();
+    const legacyState = withRoute(createNewGame(SEED, "free"));
+    storage.set("metro-network-tycoon/save", encodeSave(legacyState));
+    migrateLegacySave(storage);
+    expect(storage.get("metro-network-tycoon/save")).toBeNull();
+    const slots = listSaveSlots(storage);
+    expect(slots.length).toBe(1);
+    const slotId = slots[0]?.id as string;
+    const loaded = readSaveSlot(slotId, storage);
     expect(loaded?.ok).toBe(true);
     if (loaded && loaded.ok) {
       expect(loaded.state.routes.length).toBe(1);
     }
-
-    clearSave(storage);
-    expect(hasSave(storage)).toBe(false);
   });
 
   it("損毀的 JSON 會得到可理解的錯誤而非例外", () => {
     const storage = new MemoryStorage();
-    storage.write("{ this is not valid json");
-    const result = readSave(storage);
+    const slotId = createSaveSlot();
+    storage.set(slotKey(slotId), "{ this is not valid json");
+    const result = readSaveSlot(slotId, storage);
     expect(result).not.toBeNull();
     expect(result?.ok).toBe(false);
     if (result && !result.ok) {
       expect(result.error.length).toBeGreaterThan(0);
     }
+  });
+
+  it("自動存檔以節流方式寫入指定欄位", async () => {
+    const storage = new MemoryStorage();
+    const slotId = createSaveSlot();
+    const state = createNewGame(SEED, "free");
+    const store = new Store(state);
+    const dispose = installAutosave(store, slotId, 60, storage);
+    store.update((s) => {
+      s.player.money = 123456;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    const saved = readSaveSlot(slotId, storage);
+    expect(saved?.ok).toBe(true);
+    if (saved && saved.ok) {
+      expect(Math.round(saved.state.player.money)).toBe(123456);
+    }
+    dispose();
   });
 
   it("counters 會依路線數量修正，避免 ID 衝突", () => {

@@ -54,12 +54,12 @@ export function upgradeStation(
 
 /**
  * 車站每日營運成本。
- * 只有已連接路線、實際營運中的車站才負擔完整營運成本；
- * 尚未連接的車站僅收取少量場地維護費。
+ * 只有「已開通（有路線停靠）」的車站才計費；探索發現但尚未連接的車站為 0 成本，
+ * 因此擴大探索不會增加營運負擔。
  */
 export function stationDailyCost(station: Station): number {
   if (station.routeIds.length === 0) {
-    return STATION_ECONOMY.idleCostPerDay;
+    return 0;
   }
   return STATION_ECONOMY.baseCostPerDay + STATION_ECONOMY.costPerLevel * (station.level - 1);
 }

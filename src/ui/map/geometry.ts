@@ -7,7 +7,7 @@ import type { Point } from "../../core/types.ts";
 
 /** 每條路線在共用路段上的垂直偏移量（依建立順序錯開，避免互相覆蓋）。 */
 export function routeOffsetFor(index: number): number {
-  return ((index % 7) - 3) * 3.6;
+  return ((index % 7) - 3) * 2.6;
 }
 
 /**
@@ -65,8 +65,15 @@ export function offsetPolyline(points: readonly Point[], offset: number): Point[
   return result;
 }
 
-/** 以平滑曲線繪製折線路徑（不執行 beginPath/stroke）。 */
-export function traceSmoothPath(ctx: CanvasRenderingContext2D, points: readonly Point[]): void {
+/**
+ * 精確折線路徑：直線連接每個頂點，只在轉角以 arcTo 做小幅圓角，
+ * 確保線條「精確穿過」每個城市（與列車行進路徑完全一致）。
+ */
+export function traceSmoothPath(
+  ctx: CanvasRenderingContext2D,
+  points: readonly Point[],
+  cornerRadius = 5,
+): void {
   const n = points.length;
   if (n === 0) {
     return;
@@ -82,11 +89,15 @@ export function traceSmoothPath(ctx: CanvasRenderingContext2D, points: readonly 
     return;
   }
   for (let i = 1; i < n - 1; i++) {
+    const prev = points[i - 1] as Point;
     const current = points[i] as Point;
     const next = points[i + 1] as Point;
-    const midX = (current.x + next.x) / 2;
-    const midY = (current.y + next.y) / 2;
-    ctx.quadraticCurveTo(current.x, current.y, midX, midY);
+    const radius = Math.min(
+      cornerRadius,
+      distPoint(prev, current) / 2,
+      distPoint(current, next) / 2,
+    );
+    ctx.arcTo(current.x, current.y, next.x, next.y, Math.max(0.1, radius));
   }
   const last = points[n - 1] as Point;
   ctx.lineTo(last.x, last.y);

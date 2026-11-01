@@ -186,16 +186,21 @@ export function settleDay(state: GameState): void {
     state.depotCostPending = 0;
   }
 
-  // 2. 車站成本與商業收入。
+  // 2. 車站成本與商業收入（僅計費已開通的車站，未連接的車站不產生任何費用）。
   for (const station of state.world.stations) {
+    if (station.routeIds.length === 0) {
+      continue;
+    }
     const cost = stationDailyCost(station);
-    applyTransaction(state, {
-      category: "station",
-      description: `車站營運支出：${station.name}`,
-      amount: -cost,
-      allowNegative: true,
-    });
-    totalCost += cost;
+    if (cost > 0.5) {
+      applyTransaction(state, {
+        category: "station",
+        description: `車站營運支出：${station.name}`,
+        amount: -cost,
+        allowNegative: true,
+      });
+      totalCost += cost;
+    }
 
     const income = stationDailyIncome(state, station);
     if (income > 0.5) {

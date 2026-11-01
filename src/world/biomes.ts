@@ -26,53 +26,45 @@ const BEACH_TOP = 0.505;
 const PLAIN_TOP = 0.6;
 const HILL_TOP = 0.7;
 
-const CONTINENTAL_SCALE = 4200;
-const DETAIL_SCALE = 420;
+const CONTINENTAL_SCALE = 1700;
 const RIDGE_SCALE = 540;
-const TEMP_SCALE = 3600;
-const HUMID_SCALE = 2900;
-const CLIMATE_DETAIL_SCALE = 900;
+const TEMP_SCALE = 2900;
+const HUMID_SCALE = 2400;
 
 export class BiomeFields {
   private continental: PerlinNoise;
-  private detail: PerlinNoise;
   private ridge: PerlinNoise;
   private temperature: PerlinNoise;
-  private temperatureDetail: PerlinNoise;
   private humidity: PerlinNoise;
   private styleBias: number;
 
   constructor(seed: number, style: MapStyle) {
     this.continental = new PerlinNoise(seed ^ 0x1a2b3c4d);
-    this.detail = new PerlinNoise(seed ^ 0x5e6f7081);
     this.ridge = new PerlinNoise(seed ^ 0x11223344);
     this.temperature = new PerlinNoise(seed ^ 0x77aa88cc);
-    this.temperatureDetail = new PerlinNoise(seed ^ 0x0f1e2d3c);
     this.humidity = new PerlinNoise(seed ^ 0x4b5c6d7e);
     this.styleBias = style === "continent" ? 0.2 : style === "islands" ? -0.2 : 0;
   }
 
   elevation(x: number, y: number): number {
-    const cont = this.continental.fbm(x / CONTINENTAL_SCALE, y / CONTINENTAL_SCALE, 3);
-    const detail = this.detail.fbm(x / DETAIL_SCALE, y / DETAIL_SCALE, 3) * 0.16;
-    let e = 0.5 + (cont + this.styleBias) * 0.5 + detail;
+    // 單一多頻率 fbm：低頻大陸度 + 高頻地形細節合併，降低取樣成本。
+    const base = this.continental.fbm(x / CONTINENTAL_SCALE, y / CONTINENTAL_SCALE, 5, 2.35, 0.42);
+    let e = 0.5 + (base + this.styleBias) * 0.5;
     // 高地區域疊加脊狀雜訊，形成山脈稜線。
-    const ridge = this.ridge.ridged(x / RIDGE_SCALE, y / RIDGE_SCALE, 3);
+    const ridge = this.ridge.ridged(x / RIDGE_SCALE, y / RIDGE_SCALE, 2);
     const ridgeBoost = clamp((e - 0.52) * 2.2, 0, 1) * (ridge - 0.45);
     e += Math.max(0, ridgeBoost) * 0.5;
     return clamp(e, 0, 1);
   }
 
   temperatureAt(x: number, y: number): number {
-    const base = this.temperature.fbm(x / TEMP_SCALE, y / TEMP_SCALE, 2);
-    const detail = this.temperatureDetail.noise(x / CLIMATE_DETAIL_SCALE, y / CLIMATE_DETAIL_SCALE);
-    return clamp(0.5 + base * 0.45 + detail * 0.08, 0, 1);
+    const base = this.temperature.fbm(x / TEMP_SCALE, y / TEMP_SCALE, 3, 2.6, 0.45);
+    return clamp(0.5 + base * 0.5, 0, 1);
   }
 
   humidityAt(x: number, y: number): number {
-    const base = this.humidity.fbm(x / HUMID_SCALE, y / HUMID_SCALE, 2);
-    const detail = this.temperatureDetail.noise(x / CLIMATE_DETAIL_SCALE + 137, y / CLIMATE_DETAIL_SCALE - 91);
-    return clamp(0.5 + base * 0.45 + detail * 0.08, 0, 1);
+    const base = this.humidity.fbm(x / HUMID_SCALE, y / HUMID_SCALE, 3, 2.6, 0.45);
+    return clamp(0.5 + base * 0.5, 0, 1);
   }
 
   sample(x: number, y: number): BiomeSample {

@@ -73,12 +73,12 @@ export const ECONOMY_CONFIG = {
 /** 乘客需求（重力模型）與票價設定。 */
 export const DEMAND_CONFIG = {
   /** 每小時基礎出行量係數（百萬人以下城市的流量尺度）。 */
-  baseTripsPerHour: 4.2,
+  baseTripsPerHour: 7,
   /** 人口指數（凹陷：大城市間出行不成比例增長）。 */
   populationExponent: 0.85,
-  /** 距離阻抗：1 + (距離 / refDistance)^power（地圖放大後同步調高）。 */
-  refDistance: 260,
-  impedancePower: 1.55,
+  /** 距離阻抗：1 + (距離 / refDistance)^power（無限世界，長距離衰減較緩）。 */
+  refDistance: 420,
+  impedancePower: 1.4,
   /** 各城市類型的產生／吸引權重。 */
   typeTripWeight: {
     capital: 1.3,
@@ -114,9 +114,9 @@ export const DEMAND_CONFIG = {
 
 export const FARE_CONFIG = {
   /** 起跳票價。 */
-  baseFare: 35,
+  baseFare: 40,
   /** 每公里票價。 */
-  farePerKm: 0.6,
+  farePerKm: 0.75,
   /** 最低票價。 */
   minFare: 40,
 } as const;
@@ -124,8 +124,6 @@ export const FARE_CONFIG = {
 /** 車站營運成本與商業收入（每日）。 */
 export const STATION_ECONOMY = {
   baseCostPerDay: 900,
-  /** 尚未連接路線的車站：僅收取場地維護費。 */
-  idleCostPerDay: 120,
   costPerLevel: 500,
   baseCommercialIncome: 1_400,
   commercialPerLevel: 1_100,
@@ -248,7 +246,7 @@ export const TIME_CONFIG = {
 /** 列車營運設定。 */
 export const TRAIN_CONFIG = {
   /** 每公里能源成本（基礎值，會乘上列車能源倍率）。 */
-  energyCostPerKm: 6.5,
+  energyCostPerKm: 2.8,
   /** 每站停靠時間（遊戲分鐘，基礎值）。 */
   dwellMinutes: 0.6,
   /** 賣出列車的退款比例。 */

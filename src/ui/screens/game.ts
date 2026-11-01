@@ -22,7 +22,7 @@ import {
   type ConfirmResult,
   type RouteDraft,
 } from "../../game/routes.ts";
-import { installAutosave, writeSave } from "../../game/save.ts";
+import { installAutosave, writeSaveSlot } from "../../game/save.ts";
 import { startResearch } from "../../game/research.ts";
 import { SimulationRunner } from "../../game/simulationRunner.ts";
 import { upgradeStation as upgradeStationCommand } from "../../game/stations.ts";
@@ -72,11 +72,14 @@ type PanelMode = "auto" | "garage" | "finance" | "missions" | "research";
 type UiMode = "select" | "build";
 
 export interface GameScreenOptions {
+  /** 這場遊戲對應的存檔欄位（自動／手動存檔都寫入此欄位）。 */
+  slotId: string;
   onExitToMenu(): void;
 }
 
 export class GameScreen {
   private options: GameScreenOptions;
+  private slotId: string;
   private store: Store<GameState>;
   private mapView: MapView;
   private topbar: ReturnType<typeof createTopbar>;
@@ -115,6 +118,7 @@ export class GameScreen {
 
   constructor(root: HTMLElement, state: GameState, options: GameScreenOptions) {
     this.options = options;
+    this.slotId = options.slotId;
     this.store = new Store(state);
     this.simRunner = new SimulationRunner(state);
     this.settings = loadSettings();
@@ -273,6 +277,7 @@ export class GameScreen {
         draftStops: () => (this.draft ? this.draft.stops.length : 0),
         setSpeed: (speed: GameSpeed) => this.setSpeed(speed),
         renderOnce: () => this.mapView.debugRender(),
+        terrainInfo: () => this.mapView.debugTerrainInfo(),
         flyTo: (x: number, y: number, zoom?: number) => {
           this.mapView.debugSetCamera(x, y, zoom);
           this.materializeDiscovery(true);
@@ -283,7 +288,7 @@ export class GameScreen {
 
   start(): void {
     this.disposers.push(this.store.subscribe(() => this.onStateChanged()));
-    this.disposers.push(installAutosave(this.store));
+    this.disposers.push(installAutosave(this.store, this.slotId));
 
     const onKeyDown = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null;
@@ -348,6 +353,8 @@ export class GameScreen {
       this.lastSimTick = now;
       const stepped = this.simRunner.update(dt);
       if (stepped <= 0) {
+        // 即使暫停也持續完成地形圖磚快取（rAF 被節流時的後備）。
+        this.mapView.pumpChunkBuild(4);
         return;
       }
       const state = this.store.get();
@@ -356,7 +363,7 @@ export class GameScreen {
       this.secondsSinceAutosave += dt;
       if (this.secondsSinceAutosave >= TIME_CONFIG.autosaveSeconds) {
         this.secondsSinceAutosave = 0;
-        writeSave(state);
+        writeSaveSlot(this.slotId, state);
       }
       // 無限世界探索：定期依相機位置生成周邊圖磚。
       this.discoveryAccumulator += dt;
@@ -767,7 +774,7 @@ export class GameScreen {
     if (holder.result?.ok) {
       sound.play("coin");
       this.statusbar.toast("列車升級完成：容量提升、能源消耗降低", "success");
-      writeSave(this.store.get());
+      writeSaveSlot(this.slotId, this.store.get());
     } else if (holder.result) {
       this.statusbar.toast(holder.result.error, "error");
     }
@@ -781,7 +788,7 @@ export class GameScreen {
     if (holder.result?.ok) {
       sound.play("build");
       this.statusbar.toast("車站升級完成：容量與商業收入提升", "success");
-      writeSave(this.store.get());
+      writeSaveSlot(this.slotId, this.store.get());
     } else if (holder.result) {
       this.statusbar.toast(holder.result.error, "error");
     }
@@ -795,7 +802,7 @@ export class GameScreen {
     if (holder.result?.ok) {
       sound.play("success");
       this.statusbar.toast("研究已開始", "success");
-      writeSave(this.store.get());
+      writeSaveSlot(this.slotId, this.store.get());
     } else if (holder.result) {
       this.statusbar.toast(holder.result.error, "error");
     }
@@ -813,7 +820,7 @@ export class GameScreen {
     if (result.ok) {
       const model = trainModelById(result.train.modelId);
       this.statusbar.toast(`已購買列車：${model?.name ?? result.train.modelId}`, "success");
-      writeSave(this.store.get());
+      writeSaveSlot(this.slotId, this.store.get());
     } else {
       this.statusbar.toast(PURCHASE_ERROR_MESSAGES[result.error], "error");
     }
@@ -841,7 +848,7 @@ export class GameScreen {
         this.statusbar.toast("按空白鍵或右上角 ▶ 開始營運", "info");
       }
     }
-    writeSave(this.store.get());
+    writeSaveSlot(this.slotId, this.store.get());
   }
 
   private confirmSellTrain(trainId: ID): void {
@@ -867,7 +874,7 @@ export class GameScreen {
             });
             if (holder.result?.ok) {
               this.statusbar.toast(`已賣出列車，退回 ${formatMoney(holder.result.refund)}`, "info");
-              writeSave(this.store.get());
+              writeSaveSlot(this.slotId, this.store.get());
             }
           },
         },
@@ -1060,7 +1067,7 @@ export class GameScreen {
       }
     }
     // 重要事件立即存檔。
-    writeSave(this.store.get());
+    writeSaveSlot(this.slotId, this.store.get());
     this.refreshUi();
   }
 
@@ -1103,7 +1110,7 @@ export class GameScreen {
           kind: "ghost",
           closeAfter: false,
           onClick: () => {
-            writeSave(this.store.get());
+            writeSaveSlot(this.slotId, this.store.get());
             this.statusbar.toast("已手動存檔", "success");
           },
         },

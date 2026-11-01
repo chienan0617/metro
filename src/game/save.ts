@@ -846,80 +846,157 @@ function clampNumber(value: number, min: number, max: number): number {
 
 /* ------------------------------ 儲存存取介面 ------------------------------ */
 
+/** 以鍵為單位的儲存介面（多存檔欄位使用）。 */
 export interface SaveStorage {
-  read(): string | null;
-  write(data: string): boolean;
-  remove(): void;
+  get(key: string): string | null;
+  set(key: string, value: string): boolean;
+  remove(key: string): void;
 }
 
 /** localStorage 實作；無法使用時（例如隱私模式）退化為無儲存。 */
 export const localStorageAdapter: SaveStorage = {
-  read(): string | null {
+  get(key: string): string | null {
     try {
-      return window.localStorage.getItem(SAVE_KEY);
+      return window.localStorage.getItem(key);
     } catch {
       return null;
     }
   },
-  write(data: string): boolean {
+  set(key: string, value: string): boolean {
     try {
-      window.localStorage.setItem(SAVE_KEY, data);
+      window.localStorage.setItem(key, value);
       return true;
     } catch {
       return false;
     }
   },
-  remove(): void {
+  remove(key: string): void {
     try {
-      window.localStorage.removeItem(SAVE_KEY);
+      window.localStorage.removeItem(key);
     } catch {
       // 忽略：無法存取時不需要額外處理。
     }
   },
 };
 
-export function hasSave(storage: SaveStorage = localStorageAdapter): boolean {
-  return storage.read() !== null;
-}
+const SLOT_PREFIX = "metro-network-tycoon/save/";
+const INDEX_KEY = "metro-network-tycoon/saves";
+const LEGACY_KEY = "metro-network-tycoon/save";
+const MAX_SLOTS = 10;
 
-export interface SaveSummary {
+/** 存檔欄位的基本資訊（主選單顯示用，不需要解碼整份存檔）。 */
+export interface SaveSlotMeta {
+  id: string;
+  savedAt: number;
+  seed: number;
+  mode: GameMode;
+  geoStyle: GeographyChoice;
+  /** 遊戲時間（分鐘）。 */
+  minutes: number;
   money: number;
   routeCount: number;
   trainCount: number;
-  /** 存檔中的遊戲時間（分鐘）。 */
-  clockMinutes: number;
-  savedAt: number;
 }
 
-/** 不重建世界、僅解析基本資訊，供主選單顯示存檔摘要。 */
-export function readSaveSummary(storage: SaveStorage = localStorageAdapter): SaveSummary | null {
-  const raw = storage.read();
+function readIndex(storage: SaveStorage): SaveSlotMeta[] {
+  const raw = storage.get(INDEX_KEY);
   if (raw === null) {
-    return null;
+    return [];
   }
   try {
     const parsed = JSON.parse(raw) as unknown;
-    if (!isRecord(parsed)) {
-      return null;
+    if (!Array.isArray(parsed)) {
+      return [];
     }
-    const player = isRecord(parsed["player"]) ? parsed["player"] : {};
-    const routes = Array.isArray(parsed["routes"]) ? parsed["routes"] : [];
-    const trains = Array.isArray(parsed["trains"]) ? parsed["trains"] : [];
-    const clock = isRecord(parsed["clock"]) ? parsed["clock"] : {};
-    return {
-      money: numberOr(player["money"], 0),
-      routeCount: routes.length,
-      trainCount: trains.length,
-      clockMinutes: Math.max(0, numberOr(clock["minutes"], 0)),
-      savedAt: numberOr(parsed["savedAt"], 0),
-    };
+    const entries: SaveSlotMeta[] = [];
+    for (const item of parsed) {
+      if (!isRecord(item) || typeof item["id"] !== "string") {
+        continue;
+      }
+      entries.push({
+        id: item["id"] as string,
+        savedAt: numberOr(item["savedAt"], 0),
+        seed: numberOr(item["seed"], 0),
+        mode: item["mode"] === "free" ? "free" : "career",
+        geoStyle:
+          item["geoStyle"] === "continent" || item["geoStyle"] === "islands"
+            ? (item["geoStyle"] as GeographyChoice)
+            : "auto",
+        minutes: Math.max(0, numberOr(item["minutes"], 0)),
+        money: numberOr(item["money"], 0),
+        routeCount: Math.max(0, numberOr(item["routeCount"], 0)),
+        trainCount: Math.max(0, numberOr(item["trainCount"], 0)),
+      });
+    }
+    return entries;
   } catch {
-    return null;
+    return [];
   }
 }
 
-export function readSave(storage: SaveStorage = localStorageAdapter): DecodeResult | null {
-  const raw = storage.read();
+function writeIndex(storage: SaveStorage, entries: SaveSlotMeta[]): void {
+  storage.set(INDEX_KEY, JSON.stringify(entries));
+}
+
+function upsertIndex(storage: SaveStorage, meta: SaveSlotMeta): void {
+  const index = readIndex(storage).filter((e) => e.id !== meta.id);
+  index.push(meta);
+  // 超過上限時淘汰最舊的欄位（含資料）。
+  while (index.length > MAX_SLOTS) {
+    const oldest = index.reduce((a, b) => (a.savedAt <= b.savedAt ? a : b));
+    index.splice(index.indexOf(oldest), 1);
+    storage.remove(SLOT_PREFIX + oldest.id);
+  }
+  writeIndex(storage, index);
+}
+
+function metaFromState(slotId: string, state: GameState): SaveSlotMeta {
+  return {
+    id: slotId,
+    savedAt: Date.now(),
+    seed: state.seed,
+    mode: state.mode,
+    geoStyle: state.geoStyle,
+    minutes: state.clock.minutes,
+    money: state.player.money,
+    routeCount: state.routes.length,
+    trainCount: state.trains.length,
+  };
+}
+
+/** 所有存檔欄位（新到舊）。 */
+export function listSaveSlots(storage: SaveStorage = localStorageAdapter): SaveSlotMeta[] {
+  return readIndex(storage).sort((a, b) => b.savedAt - a.savedAt);
+}
+
+/** 建立新的存檔欄位 ID（實際資料在第一次寫入時產生）。 */
+export function createSaveSlot(): string {
+  return `slot-${Date.now().toString(36)}-${Math.floor(Math.random() * 46656).toString(36)}`;
+}
+
+export function slotKey(slotId: string): string {
+  return `${SLOT_PREFIX}${slotId}`;
+}
+
+/** 將目前遊戲寫入指定存檔欄位（自動存檔與手動存檔共用）。 */
+export function writeSaveSlot(
+  slotId: string,
+  state: GameState,
+  storage: SaveStorage = localStorageAdapter,
+): boolean {
+  if (!storage.set(slotKey(slotId), encodeSave(state))) {
+    return false;
+  }
+  upsertIndex(storage, metaFromState(slotId, state));
+  return true;
+}
+
+/** 讀取指定存檔欄位；不存在回傳 null，損毀回傳錯誤。 */
+export function readSaveSlot(
+  slotId: string,
+  storage: SaveStorage = localStorageAdapter,
+): DecodeResult | null {
+  const raw = storage.get(slotKey(slotId));
   if (raw === null) {
     return null;
   }
@@ -930,27 +1007,53 @@ export function readSave(storage: SaveStorage = localStorageAdapter): DecodeResu
   }
 }
 
-export function writeSave(state: GameState, storage: SaveStorage = localStorageAdapter): boolean {
-  return storage.write(encodeSave(state));
-}
-
-export function clearSave(storage: SaveStorage = localStorageAdapter): void {
-  storage.remove();
-}
-
-/** 匯出存檔為 JSON 字串（供下載備份）。 */
-export function exportSaveText(storage: SaveStorage = localStorageAdapter): string | null {
-  return storage.read();
+export function deleteSaveSlot(slotId: string, storage: SaveStorage = localStorageAdapter): void {
+  storage.remove(slotKey(slotId));
+  writeIndex(
+    storage,
+    readIndex(storage).filter((e) => e.id !== slotId),
+  );
 }
 
 /**
- * 匯入 JSON 存檔字串：先驗證後寫入。
- * 驗證失敗時回傳錯誤，不會覆蓋現有存檔。
+ * 舊版單一存檔欄位（v4 以前只有一個 key）自動搬移成新欄位。
+ * 在應用程式啟動時呼叫一次；舊 key 會在搬移後移除。
+ */
+export function migrateLegacySave(storage: SaveStorage = localStorageAdapter): void {
+  const legacy = storage.get(LEGACY_KEY);
+  if (legacy === null) {
+    return;
+  }
+  try {
+    const decoded = decodeSave(JSON.parse(legacy) as unknown);
+    if (decoded.ok) {
+      const slotId = createSaveSlot();
+      if (storage.set(slotKey(slotId), legacy)) {
+        upsertIndex(storage, metaFromState(slotId, decoded.state));
+      }
+    }
+  } catch {
+    // 損毀的舊存檔直接忽略。
+  }
+  storage.remove(LEGACY_KEY);
+}
+
+/** 匯出指定存檔欄位為 JSON 字串（供下載備份）。 */
+export function exportSaveText(
+  slotId: string,
+  storage: SaveStorage = localStorageAdapter,
+): string | null {
+  return storage.get(slotKey(slotId));
+}
+
+/**
+ * 匯入 JSON 存檔字串：先驗證、再建立「新欄位」寫入。
+ * 驗證失敗時回傳錯誤，不會覆蓋任何現有存檔。
  */
 export function importSaveText(
   text: string,
   storage: SaveStorage = localStorageAdapter,
-): DecodeResult {
+): DecodeResult & { slotId?: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text) as unknown;
@@ -961,17 +1064,24 @@ export function importSaveText(
   if (!decoded.ok) {
     return decoded;
   }
-  if (!storage.write(text)) {
+  const slotId = createSaveSlot();
+  if (!storage.set(slotKey(slotId), text)) {
     return { ok: false, error: "無法寫入存檔（儲存空間可能已滿）" };
   }
-  return decoded;
+  upsertIndex(storage, metaFromState(slotId, decoded.state));
+  return { ok: true, state: decoded.state, slotId };
 }
 
 /**
- * 安裝自動存檔：狀態變更後以節流方式寫入（最多每 intervalMs 一次），
+ * 安裝自動存檔：狀態變更後以節流方式寫入指定欄位（最多每 intervalMs 一次），
  * 頁面隱藏或關閉時立即寫入。回傳取消安裝的函式。
  */
-export function installAutosave(state: Store<GameState>, intervalMs = 8000): () => void {
+export function installAutosave(
+  state: Store<GameState>,
+  slotId: string,
+  intervalMs = 8000,
+  storage: SaveStorage = localStorageAdapter,
+): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let pending = false;
   let lastSaveAt = 0;
@@ -979,7 +1089,7 @@ export function installAutosave(state: Store<GameState>, intervalMs = 8000): () 
   const saveNow = (): void => {
     pending = false;
     lastSaveAt = Date.now();
-    writeSave(state.get());
+    writeSaveSlot(slotId, state.get(), storage);
   };
 
   const schedule = (): void => {
@@ -1018,16 +1128,23 @@ export function installAutosave(state: Store<GameState>, intervalMs = 8000): () 
   const onHide = (): void => {
     flush();
   };
-  window.addEventListener("pagehide", onHide);
-  document.addEventListener("visibilitychange", () => {
+  const hasDom = typeof window !== "undefined" && typeof document !== "undefined";
+  const onVisibility = (): void => {
     if (document.visibilityState === "hidden") {
       flush();
     }
-  });
+  };
+  if (hasDom) {
+    window.addEventListener("pagehide", onHide);
+    document.addEventListener("visibilitychange", onVisibility);
+  }
 
   return () => {
     unsubscribe();
-    window.removeEventListener("pagehide", onHide);
+    if (hasDom) {
+      window.removeEventListener("pagehide", onHide);
+      document.removeEventListener("visibilitychange", onVisibility);
+    }
     flush();
   };
 }

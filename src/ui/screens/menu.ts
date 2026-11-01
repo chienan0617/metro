@@ -3,7 +3,7 @@
 import { formatMoneyCompact } from "../../core/format.ts";
 import type { GameMode, GeographyChoice } from "../../core/types.ts";
 import { DEFAULT_SEED } from "../../game/config.ts";
-import { exportSaveText, importSaveText, type SaveSummary } from "../../game/save.ts";
+import { exportSaveText, importSaveText, type SaveSlotMeta } from "../../game/save.ts";
 import { formatGameDate } from "../../game/time.ts";
 import { GAME_SUBTITLE, GAME_TITLE, logoSvg, STUDIO_NAME } from "../brand.ts";
 import { clearNode, el, openModal } from "../dom.ts";
@@ -12,15 +12,15 @@ import { applySettings, saveSettings, type AppSettings } from "../settings.ts";
 import { sound } from "../sound.ts";
 
 export interface MenuOptions {
-  hasSaveData: boolean;
-  saveSummary: SaveSummary | null;
+  /** 所有存檔欄位（新到舊）。 */
+  slots: SaveSlotMeta[];
   message?: { kind: "error" | "info"; text: string };
   settings: AppSettings;
   /** 取得最新的設定（設定視窗或地圖樣式變更後，選單內的快照可能過期）。 */
   getSettings(): AppSettings;
   onNewGame(seed: number, mode: GameMode): void;
-  onContinue(): void;
-  onClearSave(): void;
+  onContinue(slotId: string): void;
+  onDeleteSlot(slotId: string): void;
   onSettingsChanged(settings: AppSettings): void;
   onSaveImported(): void;
 }
@@ -71,31 +71,76 @@ export function showMenu(root: HTMLElement, options: MenuOptions): void {
     );
   }
 
-  const buttons = el("div", { class: "menu-buttons" });
-
-  if (options.hasSaveData) {
-    const summaryParts: string[] = [];
-    if (options.saveSummary) {
-      summaryParts.push(formatMoneyCompact(options.saveSummary.money));
-      summaryParts.push(`${options.saveSummary.routeCount} 條路線`);
-      if (options.saveSummary.trainCount > 0) {
-        summaryParts.push(`${options.saveSummary.trainCount} 輛列車`);
-      }
-      summaryParts.push(formatGameDate(options.saveSummary.clockMinutes, true));
-    }
-    const continueButton = el(
-      "button",
-      { class: "btn big continue-btn" },
-      el("span", { class: "continue-label", text: "繼續遊戲" }),
-      summaryParts.length > 0
-        ? el("span", { class: "continue-meta", text: summaryParts.join(" · ") })
-        : null,
+  // 存檔欄位清單（多存檔，不會互相覆蓋）。
+  if (options.slots.length > 0) {
+    card.appendChild(
+      el(
+        "div",
+        { class: "save-section-head" },
+        el("span", { class: "field-label", text: "存檔欄位" }),
+        el("span", { class: "save-section-count", text: `${options.slots.length} 個` }),
+      ),
     );
-    continueButton.addEventListener("click", () => options.onContinue());
-    buttons.appendChild(continueButton);
-  }
+    const list = el("div", { class: "save-list" });
+    for (const slot of options.slots) {
+      const modeLabel = slot.mode === "free" ? "自由經營" : "生涯模式";
+      const meta: string[] = [
+        modeLabel,
+        formatGameDate(slot.minutes, true),
+        formatMoneyCompact(slot.money),
+        `${slot.routeCount} 條路線`,
+      ];
+      if (slot.trainCount > 0) {
+        meta.push(`${slot.trainCount} 輛列車`);
+      }
+      const row = el("div", { class: "save-row" });
+      const continueButton = el(
+        "button",
+        { class: "save-continue" },
+        el("span", { class: "save-main", text: meta.join(" · ") }),
+        el("span", {
+          class: "save-sub",
+          text: `種子 ${slot.seed} · 最後儲存 ${formatSavedAt(slot.savedAt)}`,
+        }),
+      );
+      continueButton.addEventListener("click", () => options.onContinue(slot.id));
+      row.appendChild(continueButton);
 
-  card.appendChild(buttons);
+      const exportButton = el("button", {
+        class: "icon-btn",
+        title: "匯出此存檔（JSON）",
+      });
+      exportButton.innerHTML =
+        '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V4M7 9l5 5 5-5M5 19h14"/></svg>';
+      exportButton.addEventListener("click", () => {
+        const text = exportSaveText(slot.id);
+        if (text) {
+          downloadFile(`metro-save-seed-${slot.seed}.json`, text, "application/json");
+        }
+      });
+      row.appendChild(exportButton);
+
+      const deleteButton = el("button", {
+        class: "icon-btn danger",
+        title: "刪除此存檔",
+      });
+      deleteButton.innerHTML =
+        '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>';
+      deleteButton.addEventListener("click", () => {
+        openModal({
+          title: "刪除此存檔欄位？",
+          body: `將永久刪除「${meta.join(" · ")}」。其他存檔欄位不受影響，此操作無法復原。`,
+          actions: [
+            { label: "取消", kind: "ghost" },
+            { label: "刪除", kind: "danger", onClick: () => options.onDeleteSlot(slot.id) },
+          ],
+        });
+      });
+      row.appendChild(deleteButton);
+      list.appendChild(row);
+    }
+    card.appendChild(list);
+  }
 
   // 地圖種子。
   const seedInput = el("input", { class: "text-input seed-input" });
@@ -294,19 +339,6 @@ function openSettingsModal(options: MenuOptions): void {
 function openDataModal(options: MenuOptions): void {
   const body: HTMLElement[] = [];
 
-  const exportButton = el("button", {
-    class: "btn primary",
-    text: "匯出存檔（下載 JSON）",
-  });
-  exportButton.addEventListener("click", () => {
-    const text = exportSaveText();
-    if (!text) {
-      downloadFile("metro-save.json", "{ }", "application/json");
-      return;
-    }
-    downloadFile(`metro-save-seed-${readSeedMeta(text)}.json`, text, "application/json");
-  });
-
   const fileInput = el("input");
   fileInput.type = "file";
   fileInput.accept = ".json,application/json";
@@ -321,7 +353,7 @@ function openDataModal(options: MenuOptions): void {
       if (result.ok) {
         openModal({
           title: "匯入成功",
-          body: "存檔已匯入。回到主選單後按「繼續遊戲」即可載入。",
+          body: "存檔已匯入為「新的欄位」，不會覆蓋既有存檔。回到主選單即可在欄位清單中看到它。",
           actions: [{ label: "好", kind: "primary", onClick: () => options.onSaveImported() }],
         });
       } else {
@@ -334,7 +366,7 @@ function openDataModal(options: MenuOptions): void {
     });
   });
   const importButton = el("button", {
-    class: "btn",
+    class: "btn primary",
     text: "匯入存檔（選擇 JSON）",
   });
   importButton.addEventListener("click", () => fileInput.click());
@@ -342,7 +374,7 @@ function openDataModal(options: MenuOptions): void {
 
   body.push(
     el("p", {
-      text: "匯出前建議先在遊戲中手動存檔。匯入會覆蓋目前的存檔欄位，並經過完整驗證。",
+      text: "匯入的存檔一律建立為新的欄位，不會覆蓋任何現有進度。若要匯出，請使用各存檔欄位右側的下載按鈕。",
     }),
   );
 
@@ -352,14 +384,8 @@ function openDataModal(options: MenuOptions): void {
     actions: [
       { label: "關閉", kind: "ghost" },
       {
-        label: "匯出存檔",
-        kind: "primary",
-        closeAfter: false,
-        onClick: () => exportButton.click(),
-      },
-      {
         label: "匯入存檔",
-        kind: "ghost",
+        kind: "primary",
         closeAfter: false,
         onClick: () => importButton.click(),
       },
@@ -367,13 +393,13 @@ function openDataModal(options: MenuOptions): void {
   });
 }
 
-function readSeedMeta(text: string): string {
-  try {
-    const parsed = JSON.parse(text) as { seed?: number };
-    return parsed.seed !== undefined ? String(parsed.seed) : "unknown";
-  } catch {
-    return "unknown";
+function formatSavedAt(timestamp: number): string {
+  if (!timestamp) {
+    return "—";
   }
+  const date = new Date(timestamp);
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return `${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function downloadFile(name: string, content: string, mime: string): void {

@@ -1,4 +1,4 @@
-/** 新手引導卡片：依玩家實際進度逐項打勾。 */
+/** 新手引導卡片：依玩家實際進度逐項打勾；窄螢幕時可收合成小卡。 */
 
 import type { GameState } from "../../core/types.ts";
 import { el } from "../dom.ts";
@@ -22,36 +22,43 @@ export interface TutorialCard {
 }
 
 export function createTutorialCard(onSkip: () => void): TutorialCard {
+  let userExpanded = false;
+  const count = el("span", { class: "tutorial-count" });
   const list = el("div", { class: "tutorial-steps" });
   const skipButton = el("button", {
     class: "link-btn",
     text: "跳過引導",
-    onClick: onSkip,
+    onClick: (event) => {
+      event.stopPropagation();
+      onSkip();
+    },
   });
-  const root = el(
+  const head = el(
     "div",
-    { class: "tutorial-card hidden" },
-    el(
-      "div",
-      { class: "tutorial-head" },
-      el("span", { class: "tutorial-title", text: "新手引導" }),
-      skipButton,
-    ),
-    list,
+    { class: "tutorial-head", title: "點擊展開／收合" },
+    el("span", { class: "tutorial-title", text: "新手引導" }),
+    count,
+    skipButton,
   );
+  head.addEventListener("click", () => {
+    userExpanded = !userExpanded;
+    root.classList.toggle("collapsed", !userExpanded);
+  });
+  const root = el("div", { class: "tutorial-card hidden" }, head, list);
 
   const update = (state: GameState): void => {
     const visible = state.mode === "career" && state.tutorialStep < 90;
-    if (!visible) {
-      root.classList.add("hidden");
-      return;
-    }
-    const allDone = STEPS.every((step) => step.done(state));
-    if (allDone) {
+    const doneCount = STEPS.filter((step) => step.done(state)).length;
+    if (!visible || doneCount === STEPS.length) {
       root.classList.add("hidden");
       return;
     }
     root.classList.remove("hidden");
+    count.textContent = `${doneCount}/${STEPS.length}`;
+    // 窄螢幕預設收合成小卡（使用者點擊可展開）。
+    const narrow = window.matchMedia("(max-width: 920px)").matches;
+    root.classList.toggle("collapsed", narrow && !userExpanded);
+
     list.innerHTML = "";
     let currentMarked = false;
     for (const step of STEPS) {
