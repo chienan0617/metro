@@ -1,0 +1,389 @@
+/** 主選單：遊戲模式、繼續遊戲、地圖種子、設定與資料管理。 */
+
+import { formatMoneyCompact } from "../../core/format.ts";
+import type { GameMode, GeographyChoice } from "../../core/types.ts";
+import { DEFAULT_SEED } from "../../game/config.ts";
+import { exportSaveText, importSaveText, type SaveSummary } from "../../game/save.ts";
+import { formatGameDate } from "../../game/time.ts";
+import { GAME_SUBTITLE, GAME_TITLE, logoSvg, STUDIO_NAME } from "../brand.ts";
+import { clearNode, el, openModal } from "../dom.ts";
+import { openHelpModal } from "../panels/helpModal.ts";
+import { applySettings, saveSettings, type AppSettings } from "../settings.ts";
+import { sound } from "../sound.ts";
+
+export interface MenuOptions {
+  hasSaveData: boolean;
+  saveSummary: SaveSummary | null;
+  message?: { kind: "error" | "info"; text: string };
+  settings: AppSettings;
+  /** 取得最新的設定（設定視窗或地圖樣式變更後，選單內的快照可能過期）。 */
+  getSettings(): AppSettings;
+  onNewGame(seed: number, mode: GameMode): void;
+  onContinue(): void;
+  onClearSave(): void;
+  onSettingsChanged(settings: AppSettings): void;
+  onSaveImported(): void;
+}
+
+const MAP_STYLE_OPTIONS: ReadonlyArray<{ value: GeographyChoice; label: string; hint: string }> = [
+  { value: "auto", label: "自動", hint: "依地圖種子決定地理樣式" },
+  { value: "continent", label: "內陸大陸", hint: "廣闊內陸，僅有湖泊與內灣" },
+  { value: "mainland", label: "大陸海岸", hint: "單側海洋、內陸延伸至地圖邊緣" },
+  { value: "strait", label: "海峽雙陸", hint: "兩塊大陸隔著海峽" },
+  { value: "island", label: "海島", hint: "四面環海的大陸" },
+];
+
+export function showMenu(root: HTMLElement, options: MenuOptions): void {
+  clearNode(root);
+  const screen = el("div", { class: "screen menu" });
+
+  const bgLines = el("div", { class: "menu-bg-lines" });
+  bgLines.innerHTML = `
+    <svg viewBox="0 0 1200 800" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+      <path d="M-40 620 C 220 620, 300 420, 520 420 S 820 560, 1080 300 S 1250 240, 1320 120" />
+      <path d="M-40 720 C 260 740, 420 560, 640 560 S 900 680, 1240 430" />
+      <path d="M-60 200 C 180 260, 320 120, 560 190 S 900 320, 1260 60" />
+      <circle cx="220" cy="556" r="5" />
+      <circle cx="520" cy="420" r="5" />
+      <circle cx="860" cy="500" r="5" />
+      <circle cx="640" cy="560" r="5" />
+      <circle cx="560" cy="190" r="5" />
+    </svg>`;
+  screen.appendChild(bgLines);
+
+  const topBrand = el(
+    "div",
+    { class: "menu-top" },
+    el("span", { class: "menu-top-logo", html: logoSvg(22) }),
+    el("span", { class: "menu-top-studio", text: STUDIO_NAME }),
+  );
+  screen.appendChild(topBrand);
+
+  const card = el(
+    "div",
+    { class: "menu-card" },
+    el("div", { class: "menu-logo", html: logoSvg(76) }),
+    el("h1", { class: "menu-title", text: GAME_TITLE }),
+    el("p", { class: "menu-subtitle", text: GAME_SUBTITLE }),
+  );
+
+  if (options.message) {
+    card.appendChild(
+      el("div", { class: `menu-message kind-${options.message.kind}`, text: options.message.text }),
+    );
+  }
+
+  const buttons = el("div", { class: "menu-buttons" });
+
+  if (options.hasSaveData) {
+    const summaryParts: string[] = [];
+    if (options.saveSummary) {
+      summaryParts.push(formatMoneyCompact(options.saveSummary.money));
+      summaryParts.push(`${options.saveSummary.routeCount} 條路線`);
+      if (options.saveSummary.trainCount > 0) {
+        summaryParts.push(`${options.saveSummary.trainCount} 輛列車`);
+      }
+      summaryParts.push(formatGameDate(options.saveSummary.clockMinutes, true));
+    }
+    const continueButton = el(
+      "button",
+      { class: "btn big continue-btn" },
+      el("span", { class: "continue-label", text: "繼續遊戲" }),
+      summaryParts.length > 0
+        ? el("span", { class: "continue-meta", text: summaryParts.join(" · ") })
+        : null,
+    );
+    continueButton.addEventListener("click", () => options.onContinue());
+    buttons.appendChild(continueButton);
+  }
+
+  card.appendChild(buttons);
+
+  // 地圖種子。
+  const seedInput = el("input", { class: "text-input seed-input" });
+  seedInput.type = "number";
+  seedInput.min = "1";
+  seedInput.step = "1";
+  seedInput.value = String(DEFAULT_SEED);
+  const seedError = el("div", { class: "field-error hidden", text: "請輸入有效的正整數種子" });
+  const randomButton = el("button", { class: "btn ghost sm", text: "隨機" });
+  randomButton.addEventListener("click", () => {
+    seedInput.value = String(Math.floor(Math.random() * 900000) + 100000);
+    seedError.classList.add("hidden");
+  });
+  card.appendChild(
+    el(
+      "div",
+      { class: "menu-seed-row" },
+      el("label", { class: "field-label", text: "地圖種子" }),
+      seedInput,
+      randomButton,
+    ),
+  );
+  card.appendChild(seedError);
+
+  // 地圖樣式選擇（會記住上次的選擇）。
+  const styleLabel = el("div", { class: "style-head" });
+  styleLabel.appendChild(el("span", { class: "field-label", text: "地圖樣式" }));
+  const styleHint = el("span", { class: "style-hint" });
+  styleLabel.appendChild(styleHint);
+  card.appendChild(styleLabel);
+  const styleChips = el("div", { class: "chip-row style-chips" });
+  const chipNodes = new Map<GeographyChoice, HTMLElement>();
+  const initialStyle = options.settings.mapStyle;
+  for (const option of MAP_STYLE_OPTIONS) {
+    const button = el("button", {
+      class: `chip chip-button${option.value === initialStyle ? " selected" : ""}`,
+      text: option.label,
+      title: option.hint,
+      onClick: () => {
+        for (const [value, node] of chipNodes) {
+          node.classList.toggle("selected", value === option.value);
+        }
+        styleHint.textContent = option.hint;
+        const updated: AppSettings = { ...options.getSettings(), mapStyle: option.value };
+        saveSettings(updated);
+        options.onSettingsChanged(updated);
+      },
+    });
+    chipNodes.set(option.value, button);
+    styleChips.appendChild(button);
+  }
+  styleHint.textContent =
+    MAP_STYLE_OPTIONS.find((o) => o.value === initialStyle)?.hint ?? "";
+  card.appendChild(styleChips);
+
+  const readSeed = (): number | null => {
+    const value = Number.parseInt(seedInput.value, 10);
+    if (!Number.isInteger(value) || value < 1 || value > 2_147_483_647) {
+      seedError.classList.remove("hidden");
+      seedInput.focus();
+      return null;
+    }
+    return value;
+  };
+
+  // 遊戲模式。
+  const modeRow = el("div", { class: "menu-modes" });
+  const careerButton = el(
+    "button",
+    { class: "btn primary big mode-btn" },
+    el("span", { class: "mode-name", text: "新遊戲（生涯模式）" }),
+    el("span", {
+      class: "mode-desc",
+      text: "城市逐步解鎖；任務、科技與事件帶你從一條路線成長為大型路網。",
+    }),
+  );
+  careerButton.addEventListener("click", () => {
+    const seed = readSeed();
+    if (seed !== null) {
+      options.onNewGame(seed, "career");
+    }
+  });
+  const freeButton = el(
+    "button",
+    { class: "btn big mode-btn" },
+    el("span", { class: "mode-name", text: "自由經營模式" }),
+    el("span", {
+      class: "mode-desc",
+      text: "全部城市解鎖、起始資金充裕，沒有任務壓力，專心規劃你的路網。",
+    }),
+  );
+  freeButton.addEventListener("click", () => {
+    const seed = readSeed();
+    if (seed !== null) {
+      options.onNewGame(seed, "free");
+    }
+  });
+  modeRow.appendChild(careerButton);
+  modeRow.appendChild(freeButton);
+  card.appendChild(modeRow);
+
+  card.appendChild(
+    el("div", {
+      class: "menu-seed-note",
+      text: "同一組種子會產生完全相同的地圖，方便重複遊玩或與朋友挑戰同一張圖。",
+    }),
+  );
+
+  const links = el("div", { class: "menu-links" });
+  links.appendChild(
+    el("button", {
+      class: "link-btn",
+      text: "操作說明",
+      onClick: () => openHelpModal({ firstTime: true }),
+    }),
+  );
+  links.appendChild(
+    el("button", { class: "link-btn", text: "設定", onClick: () => openSettingsModal(options) }),
+  );
+  links.appendChild(
+    el("button", {
+      class: "link-btn",
+      text: "資料管理",
+      onClick: () => openDataModal(options),
+    }),
+  );
+  card.appendChild(links);
+
+  const center = el(
+    "div",
+    { class: "menu-center" },
+    card,
+    el("div", { class: "menu-footer", text: `${STUDIO_NAME} · v1.0 · 完整營運系統` }),
+  );
+  screen.appendChild(center);
+  root.appendChild(screen);
+}
+
+/* ------------------------------ 設定 ------------------------------ */
+
+function openSettingsModal(options: MenuOptions): void {
+  const settings = { ...options.getSettings() };
+  const rows = el("div", { class: "settings-rows" });
+
+  const makeToggle = (
+    label: string,
+    description: string,
+    key: "sound" | "vibration" | "reducedMotion",
+  ): HTMLElement => {
+    const input = el("input");
+    input.type = "checkbox";
+    input.checked = settings[key];
+    input.addEventListener("change", () => {
+      settings[key] = input.checked;
+    });
+    return el(
+      "label",
+      { class: "settings-row" },
+      el("span", { class: "settings-text" }, el("span", { class: "settings-label", text: label }), el("span", { class: "settings-desc", text: description })),
+      input,
+    );
+  };
+
+  rows.appendChild(makeToggle("音效", "按鈕、建設、任務完成的提示音", "sound"));
+  rows.appendChild(
+    makeToggle("震動回饋", "支援的裝置會在重要操作時短暫震動", "vibration"),
+  );
+  rows.appendChild(makeToggle("降低動畫", "減少介面動畫與過場效果", "reducedMotion"));
+
+  openModal({
+    title: "設定",
+    body: [
+      rows,
+      el("p", {
+        text: "設定與存檔分開保存，不會因新遊戲而重置。",
+      }),
+    ],
+    actions: [
+      { label: "取消", kind: "ghost" },
+      {
+        label: "儲存設定",
+        kind: "primary",
+        onClick: () => {
+          saveSettings(settings);
+          sound.setEnabled(settings.sound);
+          applySettings(settings);
+          options.onSettingsChanged(settings);
+        },
+      },
+    ],
+  });
+}
+
+/* ------------------------------ 資料管理 ------------------------------ */
+
+function openDataModal(options: MenuOptions): void {
+  const body: HTMLElement[] = [];
+
+  const exportButton = el("button", {
+    class: "btn primary",
+    text: "匯出存檔（下載 JSON）",
+  });
+  exportButton.addEventListener("click", () => {
+    const text = exportSaveText();
+    if (!text) {
+      downloadFile("metro-save.json", "{ }", "application/json");
+      return;
+    }
+    downloadFile(`metro-save-seed-${readSeedMeta(text)}.json`, text, "application/json");
+  });
+
+  const fileInput = el("input");
+  fileInput.type = "file";
+  fileInput.accept = ".json,application/json";
+  fileInput.classList.add("hidden");
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files?.[0];
+    if (!file) {
+      return;
+    }
+    void file.text().then((text) => {
+      const result = importSaveText(text);
+      if (result.ok) {
+        openModal({
+          title: "匯入成功",
+          body: "存檔已匯入。回到主選單後按「繼續遊戲」即可載入。",
+          actions: [{ label: "好", kind: "primary", onClick: () => options.onSaveImported() }],
+        });
+      } else {
+        openModal({
+          title: "匯入失敗",
+          body: `無法匯入此存檔：${result.error}`,
+          actions: [{ label: "關閉", kind: "ghost" }],
+        });
+      }
+    });
+  });
+  const importButton = el("button", {
+    class: "btn",
+    text: "匯入存檔（選擇 JSON）",
+  });
+  importButton.addEventListener("click", () => fileInput.click());
+  body.push(fileInput);
+
+  body.push(
+    el("p", {
+      text: "匯出前建議先在遊戲中手動存檔。匯入會覆蓋目前的存檔欄位，並經過完整驗證。",
+    }),
+  );
+
+  openModal({
+    title: "資料管理",
+    body,
+    actions: [
+      { label: "關閉", kind: "ghost" },
+      {
+        label: "匯出存檔",
+        kind: "primary",
+        closeAfter: false,
+        onClick: () => exportButton.click(),
+      },
+      {
+        label: "匯入存檔",
+        kind: "ghost",
+        closeAfter: false,
+        onClick: () => importButton.click(),
+      },
+    ],
+  });
+}
+
+function readSeedMeta(text: string): string {
+  try {
+    const parsed = JSON.parse(text) as { seed?: number };
+    return parsed.seed !== undefined ? String(parsed.seed) : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function downloadFile(name: string, content: string, mime: string): void {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = name;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}

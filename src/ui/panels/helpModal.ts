@@ -1,0 +1,83 @@
+/** 操作說明對話框。 */
+
+import { openModal } from "../dom.ts";
+import { GAME_TITLE } from "../brand.ts";
+import { el } from "../dom.ts";
+
+export function openHelpModal(options?: { firstTime?: boolean }): void {
+  const body = [
+    el("div", { class: "help-section" },
+      el("h3", { text: "遊戲目標" }),
+      el("p", {
+        text: "你經營一家區域捷運公司。在地圖上自行選擇要連接的城市、決定路線經過哪些城市，把零散的城镇逐步連成有效率的交通網絡。",
+      }),
+    ),
+    el("div", { class: "help-section" },
+      el("h3", { text: "如何建立路線" }),
+      el("ol", { class: "help-steps" },
+        el("li", { text: "按左側工具列的「建立路線」，進入建設模式。" }),
+        el("li", { text: "依序點選想停靠的城市，順序就是列車未來的行駛順序。" }),
+        el("li", { text: "面板會即時顯示距離、建設成本與轉乘資訊；可調整順序或移除停靠站。" }),
+        el("li", { text: "確認建設後扣款並立即完工，路線會顯示在地圖上，之後可隨時改名或改色。" }),
+      ),
+    ),
+    el("div", { class: "help-section" },
+      el("h3", { text: "列車與營運" }),
+      el("ol", { class: "help-steps" },
+        el("li", { text: "到左側「車庫」購買列車；價格、容量、速度與維護成本各有不同。" }),
+        el("li", { text: "在車庫或路線面板把列車配置到路線；配置多輛列車可縮短班距。" }),
+        el("li", { text: "在路線面板設定「發車間隔」，並可暫停／恢復路線營運。" }),
+        el("li", { text: "用右上角速度控制開始營運：暫停、1×、2×、4×。" }),
+      ),
+    ),
+    el("div", { class: "help-section" },
+      el("h3", { text: "營運成本" }),
+      el("p", {
+        text: "列車行駛會消耗能源（依里程計費），所有列車每日結算維護費，待命列車也會產生維護費。支出每日自動寫入財務紀錄，資金可能暫時轉為負值，需要調整路線或車隊規模。",
+      }),
+    ),
+    el("div", { class: "help-section" },
+      el("h3", { text: "地圖操作" }),
+      el("ul", { class: "help-list" },
+        el("li", { text: "拖曳：平移地圖；滾輪：以滑鼠位置為中心縮放。" }),
+        el("li", { text: "點擊城市：查看城市資訊；點擊路線：查看路線資訊。" }),
+        el("li", { text: "建設模式中，右鍵或「復原一站」可退回上一個停靠站；Esc 取消建設。" }),
+        el("li", { text: "鍵盤：空白鍵暫停／繼續；0、1、2、4 切換速度；Esc 取消選取。" }),
+      ),
+    ),
+    el("div", { class: "help-section" },
+      el("h3", { text: "乘客與收益" }),
+      el("ul", { class: "help-list" },
+        el("li", { text: "城市之間每個小時都會產生通勤與旅運需求；行經路線、班距與列車容量決定能載多少乘客。" }),
+        el("li", { text: "票價依實際旅程距離計算；轉乘站讓乘客能跨路線完成旅程，帶來更多收入。" }),
+        el("li", { text: "能源費依行駛里程計算，維護費與車站營運費每日結算；可在「財務」面板查看每日收支。" }),
+        el("li", { text: "候車時間與擁擠程度會影響車站滿意度，進而影響未來的需求。" }),
+      ),
+    ),
+    el("div", { class: "help-section" },
+      el("h3", { text: "成長系統" }),
+      el("ul", { class: "help-list" },
+        el("li", { text: "載運旅客與完成任務可獲得公司經驗，升級會解鎖新城市與新型列車。" }),
+        el("li", { text: "「任務」面板：完成主要目標獲得獎勵，附加目標提高星等評價。" }),
+        el("li", { text: "「研究」面板（等級 2 解鎖）：列車、車站、營運三條研究線，可降低成本並提升容量。" }),
+        el("li", { text: "在城市面板升級車站：提高容量、商業收入與旅客滿意度。" }),
+        el("li", { text: "車庫可升級個別列車：容量提升、能源消耗降低。" }),
+        el("li", { text: "隨機事件（展覽、節慶、能源漲價、施工等）會改變需求與成本，留意通知。" }),
+      ),
+    ),
+    el("div", { class: "help-section" },
+      el("h3", { text: "存檔與設定" }),
+      el("ul", { class: "help-list" },
+        el("li", { text: "遊戲會自動存檔；遊戲內「選單」提供手動存檔。" }),
+        el("li", { text: "主選單的「資料管理」可匯出／匯入 JSON 存檔備份。" }),
+        el("li", { text: "主選單的「設定」可開關音效、震動與降低動畫。" }),
+      ),
+    ),
+  ];
+
+  openModal({
+    title: options?.firstTime ? `歡迎來到《${GAME_TITLE}》` : "操作說明",
+    body,
+    actions: [{ label: options?.firstTime ? "開始遊戲" : "關閉", kind: "primary" }],
+  });
+}

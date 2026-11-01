@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1254" height="1254" viewBox="0 0 1254 1254" role="img" aria-labelledby="title desc">
+  <title id="title">CA geometric logo</title>
+  <desc id="desc">White geometric CA monogram centered on a black background.</desc>
+  <rect width="1254" height="1254" fill="#000000" />
+  <g fill="#FFFFFF" fill-rule="nonzero">
+    <path d="M 663 376
+         L 455 376
+         C 320 376, 211 485, 211 620
+         C 211 753, 308 858, 441 858
+         L 542 858
+         L 608 758
+         L 447 758
+         C 371 758, 309 696, 309 620
+         C 309 544, 371 481, 447 481
+         L 592 481
+         Z" />
+  <path d="M 740 376
+         L 1034 856
+         L 921 856
+         L 739 562
+         L 634 717
+         L 509 717
+         Z" />
+  </g>
+</svg>
