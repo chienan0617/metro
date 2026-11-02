@@ -7,12 +7,13 @@ import { dist } from "../core/math.ts";
 import { emptyRouteStats } from "../core/types.ts";
 import type { GameState, ID, Route, Station } from "../core/types.ts";
 import { researchMultipliers } from "./research.ts";
-import { samplerForWorld, sampleTerrainMultiplier } from "../world/terrain.ts";
+import { samplerForWorld, segmentTerrainProfile } from "../world/terrain.ts";
 import { cityById, stationById } from "../world/worldgen.ts";
 import {
   BUILD_TYPE_MULTIPLIER,
   ECONOMY_CONFIG,
   ROUTE_CONFIG,
+  SEGMENT_TERRAIN_CONFIG,
 } from "./config.ts";
 import { applyTransaction, shortfallFor } from "./economy.ts";
 
@@ -25,27 +26,38 @@ export interface RouteDraft {
 export type DraftError =
   | "invalid_stop"
   | "locked_city"
-  | "already_in_draft"
+  | "same_as_last"
   | "too_few_stops"
   | "max_stops"
   | "segment_too_short"
-  | "insufficient_funds";
+  | "insufficient_funds"
+  | "no_changes";
 
 export const DRAFT_ERROR_MESSAGES: Record<DraftError, string> = {
   invalid_stop: "找不到這個車站",
-  locked_city: "此城市尚未解鎖，無法建設",
-  already_in_draft: "此城市已在路線中",
+  locked_city: "此城市尚未解鎖，請先在城市面板解鎖",
+  same_as_last: "不可連續停靠同一站（環狀線請穿插其他站點）",
   too_few_stops: "路線至少需要兩個停靠站",
   max_stops: "已達單一路線的停靠站上限",
   segment_too_short: "兩站距離過短，無法建設路段",
   insufficient_funds: "資金不足，無法完成建設",
+  no_changes: "路線沒有任何變更",
 };
 
 export interface SegmentPreview {
   fromStationId: ID;
   toStationId: ID;
   distance: number;
+  /** 沿線平均地形倍率（未含跨水與高度差加成）。 */
+  baseTerrainMultiplier: number;
+  /** 實際採用的地形成本倍率（含跨水與高度差加成）。 */
   terrainMultiplier: number;
+  /** 是否跨越水域（需要橋梁／隧道）。 */
+  crossesWater: boolean;
+  /** 是否明顯穿越山地。 */
+  crossesMountain: boolean;
+  /** 沿線高度範圍（0-1 正規化）。 */
+  elevationRange: number;
   cost: number;
 }
 
@@ -94,11 +106,22 @@ export function stationDistance(state: GameState, aId: ID, bId: ID): number {
   return dist(a.position, b.position);
 }
 
-/** 單一路段的建設成本。 */
+/**
+ * 單一路段的建設成本。
+ * 地形變因採實際取樣：平均地形倍率 × 跨水加成 × 高度差加成，
+ * 因此「避開高山、少跨水域」的走線會明顯便宜。
+ */
 export function segmentCost(state: GameState, a: Station, b: Station): SegmentPreview {
   const distance = dist(a.position, b.position);
   const sampler = samplerForWorld(state.world);
-  const terrainMultiplier = sampleTerrainMultiplier(sampler.terrainAt, a.position, b.position);
+  const profile = segmentTerrainProfile(sampler, a.position, b.position);
+  let terrainMultiplier = profile.avgMultiplier;
+  if (profile.crossesWater) {
+    terrainMultiplier *= SEGMENT_TERRAIN_CONFIG.waterCrossingMultiplier;
+  }
+  if (profile.elevationRange > 0) {
+    terrainMultiplier *= 1 + profile.elevationRange * SEGMENT_TERRAIN_CONFIG.elevationRangeMultiplier;
+  }
   const cost =
     ECONOMY_CONFIG.trackCostPerUnit *
     distance *
@@ -109,12 +132,19 @@ export function segmentCost(state: GameState, a: Station, b: Station): SegmentPr
     fromStationId: a.id,
     toStationId: b.id,
     distance,
+    baseTerrainMultiplier: profile.avgMultiplier,
     terrainMultiplier,
+    crossesWater: profile.crossesWater,
+    crossesMountain: profile.crossesMountain,
+    elevationRange: profile.elevationRange,
     cost,
   };
 }
 
-/** 純驗證：檢查某站能否加入草稿（不修改草稿），供即時預覽與加入共用。 */
+/**
+ * 純驗證：檢查某站能否加入草稿（不修改草稿），供即時預覽與加入共用。
+ * 允許同一站重複出現（支援環狀線與繞行路線），只禁止「連續停靠同一站」。
+ */
 export function canAddStop(state: GameState, draft: RouteDraft, stationId: ID): AddStopResult {
   const station = stationById(state.world, stationId);
   if (!station) {
@@ -124,14 +154,14 @@ export function canAddStop(state: GameState, draft: RouteDraft, stationId: ID): 
   if (!city || !city.unlocked) {
     return { ok: false, error: "locked_city" };
   }
-  if (draft.stops.includes(stationId)) {
-    return { ok: false, error: "already_in_draft" };
-  }
   if (draft.stops.length >= ROUTE_CONFIG.maxStops) {
     return { ok: false, error: "max_stops" };
   }
   const last = draft.stops[draft.stops.length - 1];
   if (last !== undefined) {
+    if (last === stationId) {
+      return { ok: false, error: "same_as_last" };
+    }
     const lastStation = stationById(state.world, last);
     if (!lastStation) {
       return { ok: false, error: "invalid_stop" };
@@ -231,24 +261,34 @@ export function previewDraft(state: GameState, draft: RouteDraft): DraftPreview 
 
 export type ConfirmResult = { ok: true; route: Route } | { ok: false; error: DraftError };
 
+/** 驗證停靠順序：至少兩站、無連續重複、每段距離足夠。 */
+function validateStops(state: GameState, stops: readonly ID[]): DraftError | null {
+  if (stops.length < ROUTE_CONFIG.minStops) {
+    return "too_few_stops";
+  }
+  for (let i = 0; i + 1 < stops.length; i++) {
+    if (stops[i] === stops[i + 1]) {
+      return "same_as_last";
+    }
+  }
+  for (let i = 0; i + 1 < stops.length; i++) {
+    const distance = stationDistance(state, stops[i] as ID, stops[i + 1] as ID);
+    if (distance < ROUTE_CONFIG.minSegmentDistance) {
+      return "segment_too_short";
+    }
+  }
+  return null;
+}
+
 /** 確認建設：驗證規則、扣除資金、建立路線並連接車站。 */
 export function confirmDraft(
   state: GameState,
   draft: RouteDraft,
   options?: { name?: string },
 ): ConfirmResult {
-  if (draft.stops.length < ROUTE_CONFIG.minStops) {
-    return { ok: false, error: "too_few_stops" };
-  }
-  const unique = new Set(draft.stops);
-  if (unique.size !== draft.stops.length) {
-    return { ok: false, error: "already_in_draft" };
-  }
-  for (let i = 0; i + 1 < draft.stops.length; i++) {
-    const distance = stationDistance(state, draft.stops[i] as ID, draft.stops[i + 1] as ID);
-    if (distance < ROUTE_CONFIG.minSegmentDistance) {
-      return { ok: false, error: "segment_too_short" };
-    }
+  const validationError = validateStops(state, draft.stops);
+  if (validationError !== null) {
+    return { ok: false, error: validationError };
   }
 
   const preview = previewDraft(state, draft);
@@ -311,6 +351,167 @@ export function routeGeometrics(
     constructionCost += segment.cost;
   }
   return { totalDistance, constructionCost };
+}
+
+/** 路段的無向鍵（A—B 與 B—A 視為同一段）。 */
+function segmentKey(a: ID, b: ID): string {
+  return a < b ? `${a}|${b}` : `${b}|${a}`;
+}
+
+/** 路線修改計畫：只計新路段費用，拆除不收費也不退費。 */
+export interface RouteEditPlan {
+  /** 需要新建的路段。 */
+  added: SegmentPreview[];
+  addedDistance: number;
+  addedCost: number;
+  /** 被移除的路段數（拆除不收費亦不退費）。 */
+  removedCount: number;
+  /** 修改後的全程距離與總建設成本（供顯示用）。 */
+  totalDistance: number;
+  totalCost: number;
+}
+
+export type RouteEditResult =
+  | { ok: true; plan: RouteEditPlan }
+  | { ok: false; error: DraftError };
+
+/**
+ * 規劃路線修改（延伸／縮短／改順序）：回傳新增路段與費用，不修改任何狀態。
+ * 既有路段以「無向多重集合」比對，因此反向行駛與環狀線重複經過都不會重複計費。
+ */
+export function planRouteEdit(
+  state: GameState,
+  routeId: ID,
+  newStops: readonly ID[],
+): RouteEditResult {
+  const route = state.routes.find((r) => r.id === routeId);
+  if (!route) {
+    return { ok: false, error: "invalid_stop" };
+  }
+  const validationError = validateStops(state, newStops);
+  if (validationError !== null) {
+    return { ok: false, error: validationError };
+  }
+  for (const stationId of newStops) {
+    const station = stationById(state.world, stationId);
+    const city = station ? cityById(state.world, station.cityId) : null;
+    if (!city || !city.unlocked) {
+      return { ok: false, error: "locked_city" };
+    }
+  }
+  const unchanged =
+    newStops.length === route.stationIds.length &&
+    newStops.every((stationId, index) => stationId === route.stationIds[index]);
+  if (unchanged) {
+    return { ok: false, error: "no_changes" };
+  }
+
+  // 舊路段多重集合。
+  const oldKeys = new Map<string, number>();
+  for (let i = 0; i + 1 < route.stationIds.length; i++) {
+    const key = segmentKey(route.stationIds[i] as ID, route.stationIds[i + 1] as ID);
+    oldKeys.set(key, (oldKeys.get(key) ?? 0) + 1);
+  }
+
+  const added: SegmentPreview[] = [];
+  let addedDistance = 0;
+  let addedCost = 0;
+  for (let i = 0; i + 1 < newStops.length; i++) {
+    const from = newStops[i] as ID;
+    const to = newStops[i + 1] as ID;
+    const key = segmentKey(from, to);
+    const remaining = oldKeys.get(key) ?? 0;
+    if (remaining > 0) {
+      oldKeys.set(key, remaining - 1);
+      continue;
+    }
+    const stationA = stationById(state.world, from);
+    const stationB = stationById(state.world, to);
+    if (!stationA || !stationB) {
+      return { ok: false, error: "invalid_stop" };
+    }
+    const segment = segmentCost(state, stationA, stationB);
+    added.push(segment);
+    addedDistance += segment.distance;
+    addedCost += segment.cost;
+  }
+  let removedCount = 0;
+  for (const count of oldKeys.values()) {
+    removedCount += count;
+  }
+  const geometrics = routeGeometrics(state, newStops);
+  return {
+    ok: true,
+    plan: {
+      added,
+      addedDistance,
+      addedCost,
+      removedCount,
+      totalDistance: geometrics.totalDistance,
+      totalCost: geometrics.constructionCost,
+    },
+  };
+}
+
+export type ApplyRouteEditResult =
+  | { ok: true; route: Route; plan: RouteEditPlan }
+  | { ok: false; error: DraftError };
+
+/** 套用路線修改：驗證、收取新增路段費用、更新停靠順序並讓列車重新發車。 */
+export function applyRouteEdit(
+  state: GameState,
+  routeId: ID,
+  newStops: readonly ID[],
+): ApplyRouteEditResult {
+  const planned = planRouteEdit(state, routeId, newStops);
+  if (!planned.ok) {
+    return planned;
+  }
+  const route = state.routes.find((r) => r.id === routeId);
+  if (!route) {
+    return { ok: false, error: "invalid_stop" };
+  }
+  const { plan } = planned;
+  if (plan.addedCost > 0) {
+    const tx = applyTransaction(state, {
+      category: "route_construction",
+      description: `路線修改：${route.name}`,
+      amount: -plan.addedCost,
+    });
+    if (!tx.ok) {
+      return { ok: false, error: "insufficient_funds" };
+    }
+  }
+
+  route.stationIds = newStops.slice();
+  route.totalDistance = plan.totalDistance;
+  route.constructionCost += plan.addedCost;
+  // 重新排定發車時刻，避免舊班表與新路線長度脫節。
+  route.departureSlots = [state.clock.minutes, state.clock.minutes];
+
+  for (const station of state.world.stations) {
+    const shouldServe = route.stationIds.includes(station.id);
+    const serves = station.routeIds.includes(route.id);
+    if (shouldServe && !serves) {
+      station.routeIds.push(route.id);
+    } else if (!shouldServe && serves) {
+      station.routeIds.splice(station.routeIds.indexOf(route.id), 1);
+    }
+  }
+
+  // 路線變更後讓列車回到起點重新出發（避免落在不存在的路段上）。
+  for (const train of state.trains) {
+    if (train.routeId !== routeId) {
+      continue;
+    }
+    train.currentSegmentIndex = 0;
+    train.progressOnSegment = 0;
+    train.direction = 1;
+    train.passengers = 0;
+    train.dwellRemaining = 0;
+    train.status = "stopped";
+  }
+  return { ok: true, route, plan };
 }
 
 export function deleteRoute(state: GameState, routeId: ID): boolean {

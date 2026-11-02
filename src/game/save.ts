@@ -38,7 +38,6 @@ import type {
   Train,
   TrainStatus,
 } from "../core/types.ts";
-import { unlockCitiesForLevel } from "./progression.ts";
 import { generateWorld, stationById } from "../world/worldgen.ts";
 import {
   CITY_TYPE_PARAMS,
@@ -369,13 +368,11 @@ export function decodeSave(raw: unknown): DecodeResult {
     ),
   };
 
-  // 依公司等級重新套用城市解鎖（自由模式全部解鎖）。
+  // 自由模式全部解鎖；生涯模式的解鎖狀態已隨存檔還原（由玩家付費解鎖）。
   if (state.mode === "free") {
     for (const city of state.world.cities) {
       city.unlocked = true;
     }
-  } else {
-    unlockCitiesForLevel(state);
   }
 
   return { ok: true, state };
@@ -719,16 +716,15 @@ function decodeRoute(raw: unknown, state: GameState): Route | null {
     return null;
   }
   const stationIds: ID[] = [];
-  const seen = new Set<ID>();
   for (const item of stationIdsRaw) {
     if (typeof item !== "string") {
       return null;
     }
     const station = stationById(state.world, item);
-    if (!station || seen.has(item)) {
+    // 允許環狀線重複停靠同一站，但連續重複是無效資料。
+    if (!station || (stationIds.length > 0 && stationIds[stationIds.length - 1] === item)) {
       return null;
     }
-    seen.add(item);
     stationIds.push(item);
   }
   if (stationIds.length < ROUTE_CONFIG.minStops) {

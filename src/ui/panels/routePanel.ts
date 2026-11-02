@@ -20,6 +20,7 @@ export interface RoutePanelHandlers {
   onRename(name: string): void;
   onSetColor(color: string): void;
   onDelete(): void;
+  onEditRoute(routeId: ID): void;
   onClose(): void;
   onSelectCity(cityId: ID): void;
   onToggleOperation(): void;
@@ -309,11 +310,14 @@ export function renderRoutePanel(
   });
   container.appendChild(stopList);
 
-  container.appendChild(
-    infoNote("乘客需求、載客率與票務收入將於下一階段（Phase 3）開放。"),
+  const actions = el("div", { class: "panel-actions wrap" });
+  actions.appendChild(
+    el("button", {
+      class: "btn ghost",
+      text: "延伸／修改路線",
+      onClick: () => handlers.onEditRoute(route.id),
+    }),
   );
-
-  const actions = el("div", { class: "panel-actions" });
   actions.appendChild(
     el("button", {
       class: "btn danger ghost",
@@ -322,4 +326,7 @@ export function renderRoutePanel(
     }),
   );
   container.appendChild(actions);
+  container.appendChild(
+    infoNote("修改路線只收取新增路段的費用；拆除路段不收費亦不退費。"),
+  );
 }

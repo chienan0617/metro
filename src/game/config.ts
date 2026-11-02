@@ -39,12 +39,27 @@ export const WORLD_CONFIG = {
 
 /** 各地形的路線建設成本倍率。 */
 export const TERRAIN_COST_MULTIPLIER: Record<TerrainType, number> = {
-  water: 3.6,
+  water: 4.5,
   coast: 1.25,
   plain: 1.0,
   hill: 1.7,
-  mountain: 2.9,
+  mountain: 3.4,
 };
+
+/** 路段的地形變因（依實際取樣計算）。 */
+export const SEGMENT_TERRAIN_CONFIG = {
+  /** 只要跨到水域（橋梁／隧道），額外成本倍率。 */
+  waterCrossingMultiplier: 1.6,
+  /** 高度差（0-1 正規化）造成的額外成本：1 + range × 倍率。 */
+  elevationRangeMultiplier: 1.5,
+  /** 判定為「跨水域」的最小水域取樣比例。 */
+  waterShareThreshold: 0.04,
+  /** 判定為「穿越山地」的最小山地取樣比例（僅用於提示與警示）。 */
+  mountainShareThreshold: 0.22,
+  /** 判定為「地勢起伏」的最小高度範圍（僅用於提示）。 */
+  elevationRangeNotice: 0.1,
+  /** 路線修改：舊路段拆除不收費也不退費（只有新增路段計費）。 */
+} as const;
 
 /** 建設方式倍率（第一版僅地面，保留欄位以便擴充高架／地下）。 */
 export const BUILD_TYPE_MULTIPLIER = {
@@ -149,6 +164,14 @@ export const CITY_UNLOCK_TIERS = {
   radius3: 3_200,
   radius4: 4_600,
   levels: [0, 2, 3, 4, 5] as readonly number[],
+} as const;
+
+/** 解鎖城市的費用公式：基礎 + 人口比例 + 距離比例。 */
+export const CITY_UNLOCK_COST = {
+  base: 120_000,
+  perPopulation: 0.18,
+  per1000km: 70_000,
+  /** 起始核心周邊（距離 0 起算）最低費用。 */
 } as const;
 
 /** 科技研究（三條研究線，各三階）。 */

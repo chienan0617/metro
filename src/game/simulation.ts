@@ -60,6 +60,16 @@ export function stepMinute(state: GameState): void {
   }
 }
 
+/**
+ * 是否為環狀線：起點與終點相同（且至少三站），列車會單向循環而不折返。
+ */
+export function isLoopRoute(route: Route): boolean {
+  return (
+    route.stationIds.length >= 3 &&
+    route.stationIds[0] === route.stationIds[route.stationIds.length - 1]
+  );
+}
+
 /** 列車每分鐘的移動與停靠。 */
 function advanceTrain(state: GameState, train: Train, route: Route, model: TrainModel): void {
   if (route.stationIds.length < 2) {
@@ -70,13 +80,15 @@ function advanceTrain(state: GameState, train: Train, route: Route, model: Train
     train.dwellRemaining -= 1;
     return;
   }
+  const loop = isLoopRoute(route);
 
   // 停靠結束；只有在「停在端點站」時才需要等待發車時刻（行進中的列車不檢查）。
   if (train.progressOnSegment === 0) {
     const stationIndex =
       train.direction === 1 ? train.currentSegmentIndex : train.currentSegmentIndex + 1;
     const lastIndex = route.stationIds.length - 1;
-    if (stationIndex === 0 || stationIndex === lastIndex) {
+    // 環狀線沒有終點站：只在起點站檢查發車時刻（列車不會折返）。
+    if (stationIndex === 0 || (!loop && stationIndex === lastIndex)) {
       const slotIndex = stationIndex === 0 ? 0 : 1;
       const nextSlot = route.departureSlots[slotIndex] ?? 0;
       if (state.clock.minutes < nextSlot) {
@@ -114,14 +126,20 @@ function advanceTrain(state: GameState, train: Train, route: Route, model: Train
     eventEnergyCostMultiplier(state);
 }
 
-/** 抵達下一站：更新路段、折返與停靠時間。 */
+/** 抵達下一站：更新路段、折返（環狀線則循環）與停靠時間。 */
 function arriveAtStation(train: Train, route: Route): void {
   const lastIndex = route.stationIds.length - 1;
   if (train.direction === 1) {
     const station = train.currentSegmentIndex + 1;
     if (station >= lastIndex) {
-      train.direction = -1;
-      train.currentSegmentIndex = lastIndex - 1;
+      if (isLoopRoute(route)) {
+        // 環狀線：回到起點後繼續同一方向循環。
+        train.currentSegmentIndex = 0;
+        train.direction = 1;
+      } else {
+        train.direction = -1;
+        train.currentSegmentIndex = lastIndex - 1;
+      }
     } else {
       train.currentSegmentIndex = station;
     }

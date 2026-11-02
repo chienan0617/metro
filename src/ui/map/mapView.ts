@@ -8,7 +8,13 @@ import { clamp } from "../../core/math.ts";
 import type { City, GameState, ID, Point, Route, Station, World } from "../../core/types.ts";
 import { samplerForWorld, type TerrainSampler } from "../../world/terrain.ts";
 import { BIOME_RGB } from "../../world/biomes.ts";
-import { BiomeChunkCache, FAR_LEVEL, NEAR_LEVEL } from "./biomeCache.ts";
+import {
+  ALTITUDE_TINT,
+  BiomeChunkCache,
+  FAR_LEVEL,
+  NEAR_LEVEL,
+  reliefShade,
+} from "./biomeCache.ts";
 import { cityDisplayName } from "../../world/worldgen.ts";
 import { CITY_COLORS, MAP_BACKGROUND } from "../palette.ts";
 import { Camera } from "./camera.ts";
@@ -505,6 +511,7 @@ export class MapView {
     }
     const image = this.biomeImage;
     const data = image.data;
+    const elevations = new Float32Array(w * h);
     for (let py = 0; py < h; py++) {
       for (let px = 0; px < w; px++) {
         const worldPoint = this.camera.screenToWorld({
@@ -512,14 +519,34 @@ export class MapView {
           y: (py + 0.5) * scale,
         });
         const sample = this.sampler.sampleAt(worldPoint);
+        elevations[py * w + px] = sample.elevation;
         const rgb = BIOME_RGB[sample.biome];
-        // 高度陰影讓山脈更有立體感。
-        const shade = (sample.elevation - 0.5) * 26;
+        // 高度色調 + 地貌陰影讓山脈與河谷更有立體感。
+        const shade = (sample.elevation - 0.5) * ALTITUDE_TINT;
         const index = (py * w + px) * 4;
         data[index] = clamp((rgb[0] as number) + shade, 0, 255);
         data[index + 1] = clamp((rgb[1] as number) + shade, 0, 255);
         data[index + 2] = clamp((rgb[2] as number) + shade, 0, 255);
         data[index + 3] = 255;
+      }
+    }
+    // 地貌陰影：光源在西北方，與銳利圖磚採同一組參數。
+    const worldPerPixel = scale / this.camera.zoom;
+    for (let py = 1; py < h - 1; py++) {
+      for (let px = 1; px < w - 1; px++) {
+        const i = py * w + px;
+        const relief = reliefShade(
+          (elevations[i - 1] as number) - (elevations[i + 1] as number),
+          (elevations[i - w] as number) - (elevations[i + w] as number),
+          worldPerPixel,
+        );
+        if (relief === 0) {
+          continue;
+        }
+        const index = i * 4;
+        data[index] = clamp((data[index] as number) + relief, 0, 255);
+        data[index + 1] = clamp((data[index + 1] as number) + relief, 0, 255);
+        data[index + 2] = clamp((data[index + 2] as number) + relief, 0, 255);
       }
     }
     const bctx = this.biomeCanvas.getContext("2d");
@@ -803,6 +830,9 @@ export class MapView {
       const r = markerRadius(city);
       const isHover = city.id === this.hoverCityId;
       const isSelected = city.id === this.visual.selectedCityId;
+      // 未解鎖城市（生涯模式）以灰藍色與虛線外框標示。
+      const isLocked =
+        this.state !== null && this.state.mode !== "free" && !city.unlocked;
 
       if (isSelected) {
         ctx.beginPath();
@@ -825,17 +855,27 @@ export class MapView {
 
       ctx.beginPath();
       ctx.arc(screen.x, screen.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = CITY_COLORS[city.cityType];
-      ctx.fill();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = "#0a141d";
-      ctx.stroke();
-
-      if (city.cityType === "capital") {
-        ctx.beginPath();
-        ctx.arc(screen.x, screen.y, r * 0.42, 0, Math.PI * 2);
-        ctx.fillStyle = "#0a141d";
+      if (isLocked) {
+        ctx.fillStyle = "#5b6b7d";
         ctx.fill();
+        ctx.setLineDash([3, 3]);
+        ctx.lineWidth = 1.6;
+        ctx.strokeStyle = "rgba(160, 176, 194, 0.7)";
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else {
+        ctx.fillStyle = CITY_COLORS[city.cityType];
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#0a141d";
+        ctx.stroke();
+
+        if (city.cityType === "capital") {
+          ctx.beginPath();
+          ctx.arc(screen.x, screen.y, r * 0.42, 0, Math.PI * 2);
+          ctx.fillStyle = "#0a141d";
+          ctx.fill();
+        }
       }
     }
 
@@ -882,7 +922,11 @@ export class MapView {
       const r = markerRadius(city);
       const showPop = zoom >= 1.15 || city.cityType === "capital";
       const label = cityDisplayName(city);
-      const pop = `${(city.population / 10_000).toFixed(1)} 萬人`;
+      const isLocked =
+        this.state !== null && this.state.mode !== "free" && !city.unlocked;
+      const pop = isLocked
+        ? `未解鎖（等級 ${city.unlockLevel}）`
+        : `${(city.population / 10_000).toFixed(1)} 萬人`;
 
       ctx.font = `600 12px ${FONT_STACK}`;
       const nameWidth = ctx.measureText(label).width;
@@ -903,11 +947,11 @@ export class MapView {
 
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillStyle = "#e6eef7";
+      ctx.fillStyle = isLocked ? "rgba(178, 190, 205, 0.8)" : "#e6eef7";
       ctx.font = `600 12px ${FONT_STACK}`;
       ctx.fillText(label, screen.x, y + (showPop ? 9.5 : height / 2 + 0.5));
       if (showPop) {
-        ctx.fillStyle = "rgba(156, 178, 199, 0.95)";
+        ctx.fillStyle = isLocked ? "rgba(200, 168, 96, 0.95)" : "rgba(156, 178, 199, 0.95)";
         ctx.font = `400 10px ${FONT_STACK}`;
         ctx.fillText(pop, screen.x, y + 21.5);
       }

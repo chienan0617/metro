@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { dist } from "../core/math.ts";
 import type { GameState, ID } from "../core/types.ts";
-import { fareForDistance, runHourlyDemand } from "./demand.ts";
+import { fareForDistance, hourlyDemandFactor, pairDemand, runHourlyDemand } from "./demand.ts";
 import { buildNetwork, findPathsFrom } from "./network.ts";
 import { addStop, confirmDraft, createDraft, segmentCost } from "./routes.ts";
 import { createNewGame } from "./state.ts";
@@ -12,7 +12,7 @@ import {
   setRouteOperationStatus,
 } from "./trains.ts";
 import { researchMultipliers, startResearch, updateResearch } from "./research.ts";
-import { applyXp } from "./progression.ts";
+import { applyXp, cityUnlockCost, unlockCity } from "./progression.ts";
 import { stationEffectiveCapacity, stationDailyIncome, upgradeStation } from "./stations.ts";
 import { checkMission } from "./missions.ts";
 import { eventDemandMultiplier, rollDailyEvents } from "./events.ts";
@@ -314,20 +314,88 @@ describe("科技研究", () => {
 });
 
 describe("公司等級與城市解鎖", () => {
-  it("經驗值升級會解鎖城市並產生通知", () => {
+  it("升級不再自動解鎖城市，但會提示已可解鎖", () => {
     const state = createNewGame(SEED, "career");
     const lockedBefore = state.world.cities.filter((c) => !c.unlocked);
     expect(lockedBefore.length).toBeGreaterThan(0);
 
     applyXp(state, 600); // 等級 2
     expect(state.player.level).toBe(2);
+    // 城市不會自動解鎖。
     const stillLocked = state.world.cities.filter((c) => !c.unlocked);
-    expect(stillLocked.length).toBeLessThan(lockedBefore.length);
-    const unlockedNow = state.world.cities.filter(
-      (c) => c.unlocked && c.unlockLevel === 2,
-    );
-    expect(unlockedNow.length).toBeGreaterThan(0);
+    expect(stillLocked.length).toBe(lockedBefore.length);
+    const candidates = state.world.cities.filter((c) => !c.unlocked && c.unlockLevel === 2);
+    expect(candidates.length).toBeGreaterThan(0);
     expect(state.notifications.length).toBeGreaterThan(0);
+  });
+
+  it("付費解鎖：等級不足失敗、資金不足失敗、成功扣款並記錄財務", () => {
+    const state = createNewGame(SEED, "career");
+    const target = state.world.cities.find((c) => !c.unlocked);
+    expect(target).toBeDefined();
+    if (!target) {
+      return;
+    }
+
+    const tooEarly = unlockCity(state, target.id);
+    expect(tooEarly.ok).toBe(false);
+    if (!tooEarly.ok) {
+      expect(tooEarly.error).toBe("level_too_low");
+    }
+
+    state.player.level = target.unlockLevel;
+    const cost = cityUnlockCost(state, target);
+    expect(cost).toBeGreaterThan(0);
+    state.player.money = cost - 1;
+    const poor = unlockCity(state, target.id);
+    expect(poor.ok).toBe(false);
+    if (!poor.ok) {
+      expect(poor.error).toBe("insufficient_funds");
+    }
+
+    state.player.money = cost + 1_000;
+    const moneyBefore = state.player.money;
+    const result = unlockCity(state, target.id);
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(result.cost).toBe(cost);
+    expect(state.player.money).toBeCloseTo(moneyBefore - cost, 6);
+    expect(target.unlocked).toBe(true);
+    expect(state.ledger.at(-1)?.category).toBe("other");
+    expect(state.ledger.at(-1)?.description).toContain(target.name);
+
+    const again = unlockCity(state, target.id);
+    expect(again.ok).toBe(false);
+    if (!again.ok) {
+      expect(again.error).toBe("already_unlocked");
+    }
+  });
+
+  it("每日需求只計算已解鎖城市（含目的地）", () => {
+    const state = createNewGame(SEED, "career");
+    const unlocked = state.world.cities.filter((c) => c.unlocked);
+    const locked = state.world.cities.filter((c) => !c.unlocked);
+    expect(unlocked.length).toBeGreaterThan(1);
+    expect(locked.length).toBeGreaterThan(0);
+
+    const report = runHourlyDemand(state);
+    const hourFactor = hourlyDemandFactor(state);
+    let expected = 0;
+    for (const origin of unlocked) {
+      for (const destination of unlocked) {
+        if (origin.id === destination.id) {
+          continue;
+        }
+        const demand = pairDemand(state, origin, destination, hourFactor);
+        // 與模擬一致：低於門檻的需求不計入。
+        if (demand > 0.001) {
+          expected += demand;
+        }
+      }
+    }
+    expect(report.generated).toBeCloseTo(expected, 6);
   });
 
   it("自由模式所有城市都已解鎖", () => {

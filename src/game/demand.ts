@@ -100,8 +100,11 @@ export function runHourlyDemand(state: GameState): HourlyDemandReport {
   }
 
   // 無限世界效能保護：城市太多時只模擬路網周邊範圍。
-  const simulatedCities = limitSimulationCities(state);
-  const origins = simulatedCities.filter((c) => c.unlocked || state.mode === "free");
+  // 每日營運只計算「已解鎖」的城市（自由模式全部視為解鎖）。
+  const simulatedCities = limitSimulationCities(state).filter(
+    (c) => c.unlocked || state.mode === "free",
+  );
+  const origins = simulatedCities;
   let generated = 0;
   let servedTotal = 0;
   let revenueTotal = 0;

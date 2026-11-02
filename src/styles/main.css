@@ -1487,6 +1487,54 @@ select.text-input {
   gap: 2px;
 }
 
+/* 路段地形分析（施工難度與成本一覽） */
+.segment-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.segment-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px 2px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 12.5px;
+}
+
+.segment-row:last-child {
+  border-bottom: none;
+}
+
+.segment-index {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--color-bg-hover);
+  color: var(--color-text-secondary);
+  font-size: 10.5px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.segment-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-primary);
+}
+
+.segment-cost {
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+
 .cost-box {
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--line-soft);

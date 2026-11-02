@@ -57,7 +57,9 @@ export function openHelpModal(options?: { firstTime?: boolean }): void {
     el("div", { class: "help-section" },
       el("h3", { text: "成長系統" }),
       el("ul", { class: "help-list" },
-        el("li", { text: "載運旅客與完成任務可獲得公司經驗，升級會解鎖新城市與新型列車。" }),
+        el("li", {
+          text: "載運旅客與完成任務可獲得公司經驗；升級後可在城市面板付費解鎖新城市，並解鎖新型列車。",
+        }),
         el("li", { text: "「任務」面板：完成主要目標獲得獎勵，附加目標提高星等評價。" }),
         el("li", { text: "「研究」面板（等級 2 解鎖）：列車、車站、營運三條研究線，可降低成本並提升容量。" }),
         el("li", { text: "在城市面板升級車站：提高容量、商業收入與旅客滿意度。" }),

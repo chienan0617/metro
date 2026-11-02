@@ -19,7 +19,7 @@ function stationIdOf(state: GameState, cityId: ID): ID {
   return stationId;
 }
 
-function nearestCityId(state: GameState, fromId: ID): ID {
+function nearestCityId(state: GameState, fromId: ID, exclude: ID[] = []): ID {
   const from = state.world.cities.find((c) => c.id === fromId);
   if (!from) {
     throw new Error("找不到城市");
@@ -27,7 +27,7 @@ function nearestCityId(state: GameState, fromId: ID): ID {
   let best: ID | null = null;
   let bestDist = Number.POSITIVE_INFINITY;
   for (const city of state.world.cities) {
-    if (city.id === fromId) {
+    if (city.id === fromId || exclude.includes(city.id)) {
       continue;
     }
     const d = dist(from.position, city.position);
@@ -128,6 +128,54 @@ describe("營運模擬", () => {
     }
     expect(visited.has(lastIndex), `應抵達終點站 ${lastIndex}（造訪：${[...visited].join(",")}）`).toBe(true);
     expect(visited.has(0), `應折返回起點站 0（造訪：${[...visited].join(",")}）`).toBe(true);
+  });
+
+  it("環狀線列車單向循環，不會折返", () => {
+    const state = createNewGame(SEED, "free");
+    const cityA = state.world.cities[0];
+    if (!cityA) {
+      throw new Error("沒有城市");
+    }
+    const cityB = nearestCityId(state, cityA.id);
+    const cityC = nearestCityId(state, cityB, [cityA.id]);
+    const draft = createDraft("#4f8ef7");
+    addStop(state, draft, stationIdOf(state, cityA.id));
+    addStop(state, draft, stationIdOf(state, cityB));
+    addStop(state, draft, stationIdOf(state, cityC));
+    addStop(state, draft, stationIdOf(state, cityA.id)); // 回到起點 = 環狀線
+    const built = confirmDraft(state, draft);
+    if (!built.ok) {
+      throw new Error("建設失敗");
+    }
+    const bought = purchaseTrain(state, "ce-3");
+    if (!bought.ok) {
+      throw new Error("購買失敗");
+    }
+    assignTrainToRoute(state, bought.train.id, built.route.id);
+    const train = bought.train;
+
+    // 跑完整一圈以上的時間：列車行經最後一段後應回到第 0 段並繼續同向循環（不折返）。
+    const lastSegment = built.route.stationIds.length - 2;
+    const oneLap = (built.route.totalDistance / 105) * 60 * 1.6 + 240;
+    let sawLastSegment = false;
+    let returnedToStart = false;
+    for (let i = 0; i < oneLap; i++) {
+      stepMinute(state);
+      expect(train.direction).toBe(1);
+      if (train.currentSegmentIndex === lastSegment && train.progressOnSegment > 0) {
+        sawLastSegment = true;
+      }
+      if (
+        sawLastSegment &&
+        train.currentSegmentIndex === 0 &&
+        train.progressOnSegment === 0
+      ) {
+        returnedToStart = true;
+      }
+    }
+    expect(sawLastSegment).toBe(true);
+    expect(returnedToStart).toBe(true);
+    expect(train.direction).toBe(1);
   });
 
   it("行駛會累計能源成本，每日結算寫入財務紀錄", () => {

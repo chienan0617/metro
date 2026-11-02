@@ -18,6 +18,21 @@ export interface BiomeChunkLevel {
 export const FAR_LEVEL: BiomeChunkLevel = { chunkUnits: 1024, pixels: 256 };
 export const NEAR_LEVEL: BiomeChunkLevel = { chunkUnits: 512, pixels: 512 };
 
+/**
+ * 地貌陰影（立體感）參數。
+ * 以光源來自西北方的坡向明暗計算：坡度以「世界單位」為基準，
+ * 因此不同縮放層級的立體感一致（不會拉遠就變平或過強）。
+ */
+export const RELIEF_STRENGTH = 26_000;
+export const RELIEF_CLAMP = 26;
+export const ALTITUDE_TINT = 20;
+
+/** 依坡度（世界單位）計算單顆像素的地貌陰影量，已夾在合理範圍。 */
+export function reliefShade(westEast: number, northSouth: number, worldPerPixel: number): number {
+  const value = ((westEast + 0.7 * northSouth) * RELIEF_STRENGTH) / (2 * worldPerPixel);
+  return value < -RELIEF_CLAMP ? -RELIEF_CLAMP : value > RELIEF_CLAMP ? RELIEF_CLAMP : value;
+}
+
 interface QueuedChunk {
   level: BiomeChunkLevel;
   cx: number;
@@ -109,19 +124,41 @@ export class BiomeChunkCache {
     const unitPerPixel = chunkUnits / pixels;
     const originX = cx * chunkUnits;
     const originY = cy * chunkUnits;
+    // 先存高度，第二遍再以鄰居坡度計算地貌陰影。
+    const elevations = new Float32Array(pixels * pixels);
 
     for (let py = 0; py < pixels; py++) {
       const wy = originY + (py + 0.5) * unitPerPixel;
       for (let px = 0; px < pixels; px++) {
         const wx = originX + (px + 0.5) * unitPerPixel;
         const sample = sampler.sampleAt({ x: wx, y: wy });
+        elevations[py * pixels + px] = sample.elevation;
         const rgb = BIOME_RGB[sample.biome];
-        const shade = (sample.elevation - 0.5) * 26;
+        const shade = (sample.elevation - 0.5) * ALTITUDE_TINT;
         const index = (py * pixels + px) * 4;
         data[index] = clampByte((rgb[0] as number) + shade);
         data[index + 1] = clampByte((rgb[1] as number) + shade);
         data[index + 2] = clampByte((rgb[2] as number) + shade);
         data[index + 3] = 255;
+      }
+    }
+
+    // 地貌陰影：光源在西北方（左上方較亮 = 向光坡）。
+    for (let py = 1; py < pixels - 1; py++) {
+      for (let px = 1; px < pixels - 1; px++) {
+        const i = py * pixels + px;
+        const relief = reliefShade(
+          (elevations[i - 1] as number) - (elevations[i + 1] as number),
+          (elevations[i - pixels] as number) - (elevations[i + pixels] as number),
+          unitPerPixel,
+        );
+        if (relief === 0) {
+          continue;
+        }
+        const index = i * 4;
+        data[index] = clampByte((data[index] as number) + relief);
+        data[index + 1] = clampByte((data[index + 1] as number) + relief);
+        data[index + 2] = clampByte((data[index + 2] as number) + relief);
       }
     }
     ctx.putImageData(image, 0, 0);

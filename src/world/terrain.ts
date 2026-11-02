@@ -6,7 +6,7 @@
 
 import { clamp } from "../core/math.ts";
 import type { BiomeId, Point, TerrainType, World } from "../core/types.ts";
-import { TERRAIN_COST_MULTIPLIER } from "../game/config.ts";
+import { SEGMENT_TERRAIN_CONFIG, TERRAIN_COST_MULTIPLIER } from "../game/config.ts";
 import { BiomeFields, type BiomeSample, type MapStyle } from "./biomes.ts";
 
 export type { BiomeSample, MapStyle };
@@ -67,6 +67,65 @@ export function sampleTerrainMultiplier(
     sum += table[terrainOf(p)];
   }
   return sum / samples;
+}
+
+/** 一條路段的沿線地形剖面（供成本計算與 UI 提示使用）。 */
+export interface SegmentTerrainProfile {
+  /** 沿線平均的地形成本倍率（尚未計入跨水與高度差加成）。 */
+  avgMultiplier: number;
+  /** 水域取樣比例（0-1）。 */
+  waterShare: number;
+  /** 丘陵取樣比例（0-1）。 */
+  hillShare: number;
+  /** 山地取樣比例（0-1）。 */
+  mountainShare: number;
+  /** 沿線取樣高度範圍（最大 − 最小，0-1 正規化）。 */
+  elevationRange: number;
+  /** 是否跨越水域（需要橋梁／隧道）。 */
+  crossesWater: boolean;
+  /** 是否明顯穿越山地。 */
+  crossesMountain: boolean;
+}
+
+/** 取樣一條線段沿線的地形剖面：平均倍率、水域／山地比例與高度範圍。 */
+export function segmentTerrainProfile(
+  sampler: TerrainSampler,
+  a: Point,
+  b: Point,
+): SegmentTerrainProfile {
+  const length = Math.hypot(b.x - a.x, b.y - a.y);
+  const samples = clamp(Math.ceil(length / 60), 8, 48);
+  let multiplierSum = 0;
+  let waterCount = 0;
+  let hillCount = 0;
+  let mountainCount = 0;
+  let minElevation = 1;
+  let maxElevation = 0;
+  for (let i = 0; i < samples; i++) {
+    const t = (i + 0.5) / samples;
+    const sample = sampler.sampleAt({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+    multiplierSum += TERRAIN_COST_MULTIPLIER[sample.terrain];
+    if (sample.terrain === "water") {
+      waterCount++;
+    } else if (sample.terrain === "hill") {
+      hillCount++;
+    } else if (sample.terrain === "mountain") {
+      mountainCount++;
+    }
+    minElevation = Math.min(minElevation, sample.elevation);
+    maxElevation = Math.max(maxElevation, sample.elevation);
+  }
+  const waterShare = waterCount / samples;
+  const mountainShare = mountainCount / samples;
+  return {
+    avgMultiplier: multiplierSum / samples,
+    waterShare,
+    hillShare: hillCount / samples,
+    mountainShare,
+    elevationRange: maxElevation - minElevation,
+    crossesWater: waterShare >= SEGMENT_TERRAIN_CONFIG.waterShareThreshold,
+    crossesMountain: mountainShare >= SEGMENT_TERRAIN_CONFIG.mountainShareThreshold,
+  };
 }
 
 /**

@@ -121,6 +121,34 @@ describe("存檔與讀檔", () => {
     expect(decoded.state.world.cities).toEqual(state.world.cities);
   });
 
+  it("環狀線（重複停靠）存檔往返後保持完整", () => {
+    const state = createNewGame(SEED, "free");
+    const cities = state.world.cities.slice(0, 3);
+    if (cities.length < 3) {
+      throw new Error("城市不足");
+    }
+    const draft = createDraft("#4f8ef7");
+    addStop(state, draft, stationIdOf(state, cities[0]!.id));
+    addStop(state, draft, stationIdOf(state, cities[1]!.id));
+    addStop(state, draft, stationIdOf(state, cities[2]!.id));
+    addStop(state, draft, stationIdOf(state, cities[0]!.id)); // 回到起點 = 環狀線
+    const built = confirmDraft(state, draft);
+    if (!built.ok) {
+      throw new Error(`環狀線建設失敗：${built.error}`);
+    }
+    expect(built.route.stationIds[0]).toBe(built.route.stationIds[built.route.stationIds.length - 1]);
+
+    const decoded = decodeSave(JSON.parse(encodeSave(state)) as unknown);
+    expect(decoded.ok).toBe(true);
+    if (!decoded.ok) {
+      return;
+    }
+    const route = decoded.state.routes.find((r) => r.id === built.route.id);
+    expect(route).toBeDefined();
+    expect(route?.stationIds).toEqual(built.route.stationIds);
+    expect(route?.totalDistance).toBeCloseTo(built.route.totalDistance, 6);
+  });
+
   it("舊版存檔缺少建設成本欄位時，以地形倍率完整重算", () => {
     const state = withRoute(createNewGame(SEED, "free"));
     const payload = buildPayload(state) as unknown as Record<string, unknown>;
@@ -263,7 +291,7 @@ describe("存檔與讀檔", () => {
       const station = decoded.state.world.stations.find((s) => s.id === stationId);
       expect(station?.level).toBe(2);
     }
-    // 生涯模式：解鎖狀態由等級重新套用。
+    // 生涯模式：解鎖狀態隨存檔還原（未解鎖的城市維持鎖定）。
     expect(decoded.state.world.cities.some((c) => !c.unlocked)).toBe(true);
   });
 

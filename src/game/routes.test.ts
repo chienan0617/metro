@@ -1,15 +1,21 @@
 ﻿import { describe, expect, it } from "vitest";
 import { dist } from "../core/math.ts";
-import type { ID, TerrainType } from "../core/types.ts";
-import { createTerrainSampler, sampleTerrainMultiplier } from "../world/terrain.ts";
+import type { ID, Point, TerrainType } from "../core/types.ts";
+import {
+  createTerrainSampler,
+  sampleTerrainMultiplier,
+  segmentTerrainProfile,
+} from "../world/terrain.ts";
 import { ECONOMY_CONFIG, ROUTE_CONFIG } from "./config.ts";
 import {
   addStop,
+  applyRouteEdit,
   canAddStop,
   confirmDraft,
   createDraft,
   deleteRoute,
   moveStop,
+  planRouteEdit,
   previewDraft,
   removeStopAt,
   segmentCost,
@@ -89,19 +95,53 @@ describe("路線建設", () => {
     expect(mountainMultiplier).toBeGreaterThan(plainMultiplier * 2);
   });
 
-  it("不能重複加入同一城市", () => {
+  it("地形剖面會回報水域比例與高度範圍", () => {
+    const sampler = createTerrainSampler(SEED, "auto");
+    let waterPoint: Point | null = null;
+    for (let i = 0; i < 6000 && waterPoint === null; i++) {
+      const p = { x: -6000 + i * 29, y: 2500 - i * 17 };
+      if (sampler.terrainAt(p) === "water") {
+        waterPoint = p;
+      }
+    }
+    expect(waterPoint).not.toBeNull();
+    if (!waterPoint) {
+      return;
+    }
+    const profile = segmentTerrainProfile(sampler, waterPoint, {
+      x: waterPoint.x + 800,
+      y: waterPoint.y + 400,
+    });
+    expect(profile.waterShare).toBeGreaterThan(0);
+    expect(profile.avgMultiplier).toBeGreaterThan(1);
+    expect(profile.elevationRange).toBeGreaterThanOrEqual(0);
+  });
+
+  it("禁止連續重複同一城市，但允許環狀線回到起點", () => {
     const state = setup();
     const cityA = state.world.cities[0];
     if (!cityA) {
       throw new Error("沒有城市");
     }
+    const cityB = nearestCityId(state, cityA.id);
+    const stationA = stationIdOf(state, cityA.id);
+    const stationB = stationIdOf(state, cityB);
     const draft = createDraft("#4f8ef7");
-    const stationId = stationIdOf(state, cityA.id);
-    expect(addStop(state, draft, stationId).ok).toBe(true);
-    const second = addStop(state, draft, stationId);
-    expect(second.ok).toBe(false);
-    if (!second.ok) {
-      expect(second.error).toBe("already_in_draft");
+
+    expect(addStop(state, draft, stationA).ok).toBe(true);
+    const consecutive = addStop(state, draft, stationA);
+    expect(consecutive.ok).toBe(false);
+    if (!consecutive.ok) {
+      expect(consecutive.error).toBe("same_as_last");
+    }
+
+    // A → B → A：環狀線允許同一站重複出現。
+    expect(addStop(state, draft, stationB).ok).toBe(true);
+    expect(addStop(state, draft, stationA).ok).toBe(true);
+    const result = confirmDraft(state, draft);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.route.stationIds).toEqual([stationA, stationB, stationA]);
     }
   });
 
@@ -310,6 +350,110 @@ describe("路線建設", () => {
     expect(addStop(state, draft, stationIdOf(state, secondId)).ok).toBe(true);
     const result = confirmDraft(state, draft);
     expect(result.ok).toBe(true);
+  });
+
+  it("延伸路線只收取新增路段費用", () => {
+    const state = setup();
+    const first = state.world.cities[0];
+    if (!first) {
+      throw new Error("沒有城市");
+    }
+    const secondId = nearestCityId(state, first.id);
+    const thirdId = nearestCityId(state, secondId, [first.id]);
+    const stationA = stationIdOf(state, first.id);
+    const stationB = stationIdOf(state, secondId);
+    const stationC = stationIdOf(state, thirdId);
+    const draft = createDraft("#4f8ef7");
+    addStop(state, draft, stationA);
+    addStop(state, draft, stationB);
+    const built = confirmDraft(state, draft);
+    if (!built.ok) {
+      throw new Error("前置建設失敗");
+    }
+    const originalCost = built.route.constructionCost;
+
+    const plan = planRouteEdit(state, built.route.id, [stationA, stationB, stationC]);
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) {
+      return;
+    }
+    expect(plan.plan.added.length).toBe(1);
+    expect(plan.plan.removedCount).toBe(0);
+    expect(plan.plan.addedCost).toBeGreaterThan(0);
+
+    const moneyBefore = state.player.money;
+    const applied = applyRouteEdit(state, built.route.id, [stationA, stationB, stationC]);
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) {
+      return;
+    }
+    expect(state.player.money).toBeCloseTo(moneyBefore - plan.plan.addedCost, 6);
+    expect(applied.route.stationIds).toEqual([stationA, stationB, stationC]);
+    expect(applied.route.constructionCost).toBeCloseTo(originalCost + plan.plan.addedCost, 6);
+    expect(state.ledger.at(-1)?.category).toBe("route_construction");
+  });
+
+  it("拆除路段不收費也不退費；無變更、反向與鎖定城市規則正確", () => {
+    const state = setup();
+    const first = state.world.cities[0];
+    if (!first) {
+      throw new Error("沒有城市");
+    }
+    const secondId = nearestCityId(state, first.id);
+    const thirdId = nearestCityId(state, secondId, [first.id]);
+    const stationA = stationIdOf(state, first.id);
+    const stationB = stationIdOf(state, secondId);
+    const stationC = stationIdOf(state, thirdId);
+    const draft = createDraft("#4f8ef7");
+    addStop(state, draft, stationA);
+    addStop(state, draft, stationB);
+    addStop(state, draft, stationC);
+    const built = confirmDraft(state, draft);
+    if (!built.ok) {
+      throw new Error("前置建設失敗");
+    }
+
+    // 縮短路線：移除一段，費用不變。
+    const shorten = planRouteEdit(state, built.route.id, [stationA, stationB]);
+    expect(shorten.ok).toBe(true);
+    if (shorten.ok) {
+      expect(shorten.plan.added.length).toBe(0);
+      expect(shorten.plan.removedCount).toBe(1);
+    }
+    const moneyBefore = state.player.money;
+    const applied = applyRouteEdit(state, built.route.id, [stationA, stationB]);
+    expect(applied.ok).toBe(true);
+    expect(state.player.money).toBeCloseTo(moneyBefore, 6);
+    expect(built.route.stationIds).toEqual([stationA, stationB]);
+
+    // 無變更會被拒絕。
+    const noChange = planRouteEdit(state, built.route.id, [stationA, stationB]);
+    expect(noChange.ok).toBe(false);
+    if (!noChange.ok) {
+      expect(noChange.error).toBe("no_changes");
+    }
+
+    // 反向行駛（同一組路段）不需要費用。
+    const reversed = planRouteEdit(state, built.route.id, [stationB, stationA]);
+    expect(reversed.ok).toBe(true);
+    if (reversed.ok) {
+      expect(reversed.plan.added.length).toBe(0);
+      expect(reversed.plan.removedCount).toBe(0);
+    }
+
+    // 鎖定的城市不能加入路線。
+    const cityC = state.world.cities.find((c) => c.id === thirdId);
+    if (cityC) {
+      cityC.unlocked = false;
+    }
+    const locked = planRouteEdit(state, built.route.id, [stationA, stationB, stationC]);
+    expect(locked.ok).toBe(false);
+    if (!locked.ok) {
+      expect(locked.error).toBe("locked_city");
+    }
+    if (cityC) {
+      cityC.unlocked = true;
+    }
   });
 
   it("地形取樣器是可重現的（同一 seed 相同地形）", () => {

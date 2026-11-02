@@ -1,20 +1,22 @@
-/** 城市資訊面板。 */
+/** 城市資訊面板（含付費解鎖）。 */
 
 import { formatDistance, formatMoney, formatPopulation } from "../../core/format.ts";
-import type { GameState, ID } from "../../core/types.ts";
+import type { City, GameState, ID } from "../../core/types.ts";
 import { CITY_TYPE_PARAMS, ROUTE_CONFIG } from "../../game/config.ts";
+import { cityUnlockCost } from "../../game/progression.ts";
 import { stationEffectiveCapacity, stationUpgradeCost } from "../../game/stations.ts";
 import { BIOME_LABELS, biomeClimateLabel } from "../../world/biomes.ts";
 import { samplerForWorld } from "../../world/terrain.ts";
 import { cityDisplayName } from "../../world/worldgen.ts";
 import { INDUSTRY_COLORS, INDUSTRY_LABELS, TERRAIN_LABELS } from "../palette.ts";
 import { el } from "../dom.ts";
-import { chip, infoNote, panelHeader, sectionTitle, statRow } from "./kit.ts";
+import { chip, infoNote, panelHeader, sectionTitle, statRow, warningBox } from "./kit.ts";
 
 export interface CityPanelHandlers {
   onStartBuildFrom(cityId: ID): void;
   onSelectRoute(routeId: ID): void;
   onUpgradeStation(stationId: ID): void;
+  onUnlockCity(cityId: ID): void;
   onClose(): void;
 }
 
@@ -32,8 +34,13 @@ export function renderCityPanel(
   }
 
   const typeParams = CITY_TYPE_PARAMS[city.cityType];
+  const isLocked = state.mode !== "free" && !city.unlocked;
   container.appendChild(
-    panelHeader(cityDisplayName(city), handlers.onClose, chip(typeParams.label, undefined, true)),
+    panelHeader(
+      cityDisplayName(city),
+      handlers.onClose,
+      isLocked ? chip("未解鎖", "#f0b85a", true) : chip(typeParams.label, undefined, true),
+    ),
   );
 
   const stats = el("div", { class: "stat-grid" });
@@ -54,6 +61,12 @@ export function renderCityPanel(
     stats.appendChild(statRow("車站等級", `Lv.${station.level}`));
   }
   container.appendChild(stats);
+
+  // 未解鎖城市：只能查看與付費解鎖，不能建線或升級車站。
+  if (isLocked) {
+    renderUnlockSection(container, state, city, handlers);
+    return;
+  }
 
   if (station) {
     container.appendChild(sectionTitle("車站營運"));
@@ -169,7 +182,53 @@ export function renderCityPanel(
   container.appendChild(actions);
   container.appendChild(
     infoNote(
-      `提示：路段最短距離為 ${formatDistance(ROUTE_CONFIG.minSegmentDistance)}，建設成本依實際距離與地形倍率計算。`,
+      `提示：路段最短距離為 ${formatDistance(ROUTE_CONFIG.minSegmentDistance)}，建設成本依實際距離、地形與跨水／高度差加成計算。`,
     ),
   );
+}
+
+/** 未解鎖城市：顯示等級門檻、費用與解鎖按鈕。 */
+function renderUnlockSection(
+  container: HTMLElement,
+  state: GameState,
+  city: City,
+  handlers: CityPanelHandlers,
+): void {
+  const cost = cityUnlockCost(state, city);
+  const levelOk = state.player.level >= city.unlockLevel;
+  const moneyOk = state.player.money >= cost;
+
+  container.appendChild(sectionTitle("解鎖城市"));
+  const info = el("div", { class: "stat-grid" });
+  info.appendChild(statRow("需要公司等級", `Lv.${city.unlockLevel}（目前 Lv.${state.player.level}）`));
+  info.appendChild(statRow("解鎖費用", formatMoney(cost)));
+  container.appendChild(info);
+
+  const button = el("button", {
+    class: "btn primary",
+    text: `解鎖城市（${formatMoney(cost)}）`,
+    onClick: () => handlers.onUnlockCity(city.id),
+  });
+  if (!levelOk) {
+    button.disabled = true;
+    button.title = `需要公司等級 ${city.unlockLevel}`;
+  } else if (!moneyOk) {
+    button.disabled = true;
+    button.title = "資金不足";
+  }
+  container.appendChild(el("div", { class: "panel-actions" }, button));
+
+  if (!levelOk) {
+    container.appendChild(
+      infoNote("提升公司等級後才能解鎖：載運旅客與完成任務可獲得經驗值。"),
+    );
+  } else if (!moneyOk) {
+    container.appendChild(
+      warningBox([el("span", { text: `資金不足，尚缺 ${formatMoney(cost - state.player.money)}。` })]),
+    );
+  } else {
+    container.appendChild(
+      infoNote("解鎖後可在此城市建設車站與路線；每日旅運需求也只計算已解鎖的城市。"),
+    );
+  }
 }

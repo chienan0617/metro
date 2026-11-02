@@ -3,12 +3,13 @@
  * 僅負責 UI 互動與呼叫遊戲邏輯；不做模擬計算，也不各自複製遊戲狀態。
  */
 
-import { formatMoney } from "../../core/format.ts";
+import { formatDistance, formatMoney } from "../../core/format.ts";
 import { Store } from "../../core/store.ts";
 import type { GameSpeed, GameState, ID, ResearchLine } from "../../core/types.ts";
 import { TIME_CONFIG, TRAIN_CONFIG, WORLD_CONFIG } from "../../game/config.ts";
 import {
   addStop,
+  applyRouteEdit,
   canAddStop,
   confirmDraft,
   createDraft,
@@ -16,9 +17,11 @@ import {
   DRAFT_ERROR_MESSAGES,
   moveStop,
   nextRouteColor,
+  planRouteEdit,
   removeStopAt,
   renameRoute,
   setRouteColor,
+  type ApplyRouteEditResult,
   type ConfirmResult,
   type RouteDraft,
 } from "../../game/routes.ts";
@@ -42,7 +45,12 @@ import {
   stationById,
   type MaterializeContext,
 } from "../../world/worldgen.ts";
-import { pushNotification } from "../../game/progression.ts";
+import {
+  pushNotification,
+  unlockCity,
+  type UnlockCityError,
+  type UnlockCityResult,
+} from "../../game/progression.ts";
 import { clearNode, el, icon, openModal } from "../dom.ts";
 import { MapView } from "../map/mapView.ts";
 import { renderCityPanel } from "../panels/cityPanel.ts";
@@ -52,7 +60,10 @@ import { openHelpModal } from "../panels/helpModal.ts";
 import { renderMissionsPanel } from "../panels/missionsPanel.ts";
 import { renderOverviewPanel } from "../panels/overviewPanel.ts";
 import { renderResearchPanel } from "../panels/researchPanel.ts";
-import { renderRouteBuilderPanel } from "../panels/routeBuilderPanel.ts";
+import {
+  renderRouteBuilderPanel,
+  type RouteEditContext,
+} from "../panels/routeBuilderPanel.ts";
 import { renderRoutePanel } from "../panels/routePanel.ts";
 import { createStatusbar, type ToastKind } from "../panels/statusbar.ts";
 import { createTopbar } from "../panels/topbar.ts";
@@ -76,6 +87,13 @@ const PANEL_TAB_CHEVRON_RIGHT =
 
 type UiMode = "select" | "build";
 
+const UNLOCK_ERROR_MESSAGES: Record<UnlockCityError, string> = {
+  not_found: "找不到這座城市",
+  already_unlocked: "此城市已解鎖",
+  level_too_low: "公司等級不足，無法解鎖",
+  insufficient_funds: "資金不足，無法解鎖",
+};
+
 export interface GameScreenOptions {
   /** 這場遊戲對應的存檔欄位（自動／手動存檔都寫入此欄位）。 */
   slotId: string;
@@ -98,6 +116,8 @@ export class GameScreen {
   private researchButton: HTMLButtonElement;
   private mode: UiMode = "select";
   private draft: RouteDraft | null = null;
+  /** 編輯模式：正在修改的既有路線 ID（null = 建立新路線）。 */
+  private editingRouteId: ID | null = null;
   private selectedCityId: ID | null = null;
   private selectedRouteId: ID | null = null;
   private panelMode: PanelMode = "auto";
@@ -279,6 +299,8 @@ export class GameScreen {
         getState: () => this.store.get(),
         getScreenPosition: (cityId: ID) => this.mapView.screenPositionOf(cityId),
         isBuildMode: () => this.mode === "build",
+        isEditingRoute: () => this.editingRouteId !== null,
+        startEditRoute: (routeId: ID) => this.startEditRoute(routeId),
         draftStops: () => (this.draft ? this.draft.stops.length : 0),
         setSpeed: (speed: GameSpeed) => this.setSpeed(speed),
         renderOnce: () => this.mapView.debugRender(),
@@ -357,24 +379,27 @@ export class GameScreen {
       const dt = (now - this.lastSimTick) / 1000;
       this.lastSimTick = now;
       const stepped = this.simRunner.update(dt);
+      const state = this.store.get();
+
+      // 以下工作「暫停時也要執行」：
+      // 1) 完成地形圖磚快取（rAF 被節流時的後備）。
+      this.mapView.pumpChunkBuild(stepped > 0 ? 4 : 8);
+      // 2) 無限世界探索：依相機位置生成周邊城市（暫停時同樣有效）。
+      this.discoveryAccumulator += dt;
+      if (this.discoveryAccumulator >= 1.5) {
+        this.discoveryAccumulator = 0;
+        this.materializeDiscovery();
+      }
+
       if (stepped <= 0) {
-        // 即使暫停也持續完成地形圖磚快取（rAF 被節流時的後備）。
-        this.mapView.pumpChunkBuild(4);
         return;
       }
-      const state = this.store.get();
       this.topbar.update(state);
       this.consumeNotifications(state);
       this.secondsSinceAutosave += dt;
       if (this.secondsSinceAutosave >= TIME_CONFIG.autosaveSeconds) {
         this.secondsSinceAutosave = 0;
         writeSaveSlot(this.slotId, state);
-      }
-      // 無限世界探索：定期依相機位置生成周邊圖磚。
-      this.discoveryAccumulator += dt;
-      if (this.discoveryAccumulator >= 1.5) {
-        this.discoveryAccumulator = 0;
-        this.materializeDiscovery();
       }
       // 每小時刷新一次面板（任務進度、營運數據、財務）。
       const hour = Math.floor(state.clock.minutes / 60);
@@ -654,6 +679,7 @@ export class GameScreen {
         onRename: (name) => this.store.update((s) => renameRoute(s, routeId, name)),
         onSetColor: (color) => this.store.update((s) => setRouteColor(s, routeId, color)),
         onDelete: () => this.confirmDeleteRoute(routeId),
+        onEditRoute: (id) => this.startEditRoute(id),
         onClose: () => {
           this.selectedRouteId = null;
           this.refreshUi();
@@ -682,6 +708,7 @@ export class GameScreen {
           this.refreshUi();
         },
         onUpgradeStation: (stationId) => this.upgradeStationById(stationId),
+        onUnlockCity: (cityId) => this.unlockCityById(cityId),
         onClose: () => {
           this.selectedCityId = null;
           this.refreshUi();
@@ -703,6 +730,31 @@ export class GameScreen {
     if (!draft) {
       return;
     }
+
+    // 編輯模式：即時計算新增路段與費用，供面板顯示。
+    let editContext: RouteEditContext | null = null;
+    if (this.editingRouteId !== null) {
+      const route = state.routes.find((r) => r.id === this.editingRouteId);
+      if (route) {
+        const plan = planRouteEdit(state, route.id, draft.stops);
+        editContext = {
+          routeId: route.id,
+          routeName: route.name,
+          addedCost: plan.ok ? plan.plan.addedCost : 0,
+          addedDistance: plan.ok ? plan.plan.addedDistance : 0,
+          addedSegmentCount: plan.ok ? plan.plan.added.length : 0,
+          removedSegmentCount: plan.ok ? plan.plan.removedCount : 0,
+          originalStationIds: route.stationIds.slice(),
+          error: plan.ok ? null : plan.error,
+        };
+      } else {
+        // 路線被刪除：退出編輯。
+        this.editingRouteId = null;
+        this.mode = "select";
+        this.draft = null;
+      }
+    }
+
     renderRouteBuilderPanel(this.sideContent, state, draft, {
       onRemoveStop: (index) => {
         removeStopAt(draft, index);
@@ -729,7 +781,7 @@ export class GameScreen {
         draft.color = color;
         this.refreshUi();
       },
-    });
+    }, editContext);
   }
 
   /* ------------------------------ 側面板（車庫／財務／任務／研究） ------------------------------ */
@@ -1007,14 +1059,17 @@ export class GameScreen {
 
   private exitBuildMode(): void {
     const draft = this.draft;
+    const editing = this.editingRouteId !== null;
     if (draft && draft.stops.length >= 2) {
       openModal({
-        title: "取消建設？",
-        body: `目前已規劃 ${draft.stops.length} 個停靠站，取消後草稿不會保存。`,
+        title: editing ? "放棄修改？" : "取消建設？",
+        body: editing
+          ? "目前的停靠站變更尚未套用；放棄後路線維持原狀（不會有任何費用）。"
+          : `目前已規劃 ${draft.stops.length} 個停靠站，取消後草稿不會保存。`,
         actions: [
-          { label: "繼續建設", kind: "ghost" },
+          { label: editing ? "繼續編輯" : "繼續建設", kind: "ghost" },
           {
-            label: "放棄草稿",
+            label: editing ? "放棄變更" : "放棄草稿",
             kind: "danger",
             onClick: () => this.doExitBuildMode(),
           },
@@ -1028,11 +1083,39 @@ export class GameScreen {
   private doExitBuildMode(): void {
     this.mode = "select";
     this.draft = null;
+    this.editingRouteId = null;
     this.statusbar.setHint("點選城市或路線查看資訊；拖曳平移、滾輪縮放。按「建立路線」開始規劃。");
     this.refreshUi();
   }
 
+  /** 進入既有路線的編輯模式（草稿由目前停靠順序開始）。 */
+  private startEditRoute(routeId: ID): void {
+    if (this.mode === "build") {
+      return;
+    }
+    const state = this.store.get();
+    const route = state.routes.find((r) => r.id === routeId);
+    if (!route || route.stationIds.length < 2) {
+      return;
+    }
+    this.mode = "build";
+    this.editingRouteId = routeId;
+    this.draft = { stops: route.stationIds.slice(), color: route.color };
+    this.selectedRouteId = null;
+    this.selectedCityId = null;
+    this.panelMode = "auto";
+    this.panelOverride = null;
+    this.statusbar.setHint(
+      "編輯模式：點選城市加入停靠站，或在面板調整順序；確認後只收取新增路段的費用。Esc 放棄變更。",
+    );
+    this.refreshUi();
+  }
+
   private confirmBuild(): void {
+    if (this.editingRouteId !== null) {
+      this.confirmRouteEdit();
+      return;
+    }
     const draft = this.draft;
     if (!draft) {
       return;
@@ -1072,6 +1155,91 @@ export class GameScreen {
       }
     }
     // 重要事件立即存檔。
+    writeSaveSlot(this.slotId, this.store.get());
+    this.refreshUi();
+  }
+
+  /** 確認套用路線修改：只收取新增路段費用，拆除不退費。 */
+  private confirmRouteEdit(): void {
+    const draft = this.draft;
+    const routeId = this.editingRouteId;
+    if (!draft || routeId === null) {
+      return;
+    }
+    const state = this.store.get();
+    const route = state.routes.find((r) => r.id === routeId);
+    if (!route) {
+      this.doExitBuildMode();
+      return;
+    }
+    const plan = planRouteEdit(state, routeId, draft.stops);
+    if (!plan.ok) {
+      this.statusbar.toast(DRAFT_ERROR_MESSAGES[plan.error], "error");
+      return;
+    }
+
+    const apply = (): void => {
+      const holder: { result: ApplyRouteEditResult | null } = { result: null };
+      this.store.update((s) => {
+        holder.result = applyRouteEdit(s, routeId, draft.stops);
+      });
+      const result = holder.result;
+      if (!result || !result.ok) {
+        const error = result ? result.error : "insufficient_funds";
+        this.statusbar.toast(DRAFT_ERROR_MESSAGES[error], "error");
+        return;
+      }
+      const appliedRoute = result.route;
+      this.mode = "select";
+      this.draft = null;
+      this.editingRouteId = null;
+      this.selectedRouteId = appliedRoute.id;
+      this.selectedCityId = null;
+      this.mapView.revealRoute(appliedRoute.id);
+      this.statusbar.toast(
+        result.plan.addedCost > 0
+          ? `已更新「${appliedRoute.name}」：新增 ${result.plan.added.length} 段，花費 ${formatMoney(result.plan.addedCost)}`
+          : `已更新「${appliedRoute.name}」：未新增路段，無額外費用`,
+        "success",
+      );
+      writeSaveSlot(this.slotId, this.store.get());
+      this.refreshUi();
+    };
+
+    if (plan.plan.added.length === 0) {
+      // 純拆除／調整順序：不需要付費，直接套用。
+      apply();
+      return;
+    }
+    openModal({
+      title: `套用變更「${route.name}」？`,
+      body: `將新建 ${plan.plan.added.length} 段（${formatDistance(plan.plan.addedDistance)}），費用 ${formatMoney(plan.plan.addedCost)}；拆除 ${plan.plan.removedCount} 段不收費亦不退費。修改後列車會回到起點重新發車。`,
+      actions: [
+        { label: "取消", kind: "ghost" },
+        { label: "套用變更", kind: "primary", onClick: apply },
+      ],
+    });
+  }
+
+  /** 付費解鎖城市（生涯模式）。 */
+  private unlockCityById(cityId: ID): void {
+    const holder: { result: UnlockCityResult | null } = { result: null };
+    this.store.update((s) => {
+      holder.result = unlockCity(s, cityId);
+    });
+    const result = holder.result;
+    if (!result) {
+      return;
+    }
+    if (!result.ok) {
+      this.statusbar.toast(UNLOCK_ERROR_MESSAGES[result.error], "warn");
+      this.refreshUi();
+      return;
+    }
+    // 解鎖是重要里程碑：立即存檔，並確保周邊區域已生成。
+    this.materializeAt(result.city.position.x, result.city.position.y, WORLD_CONFIG.discoveryRadiusTiles);
+    this.statusbar.toast(`已解鎖「${result.city.name}」，花費 ${formatMoney(result.cost)}`, "success");
+    this.statusbar.setHint("此城市已可建設車站與路線；每日旅運需求也會開始計算這座城市。");
     writeSaveSlot(this.slotId, this.store.get());
     this.refreshUi();
   }
