@@ -69,6 +69,11 @@ import { clamp } from "../../core/math.ts";
 
 type PanelMode = "auto" | "garage" | "finance" | "missions" | "research";
 
+const PANEL_TAB_CHEVRON_LEFT =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 6.5 9 12l5.5 5.5"/></svg>';
+const PANEL_TAB_CHEVRON_RIGHT =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 6.5 15 12l-5.5 5.5"/></svg>';
+
 type UiMode = "select" | "build";
 
 export interface GameScreenOptions {
@@ -238,7 +243,7 @@ export class GameScreen {
       title: "顯示資訊面板",
       onClick: () => this.togglePanel(),
     });
-    this.panelTab.textContent = "⟨";
+    this.panelTab.innerHTML = PANEL_TAB_CHEVRON_LEFT;
     mapWrap.appendChild(this.panelTab);
 
     // 右側資訊面板（可拖曳調整寬度、可收合；窄螢幕時變為底部抽屜）。
@@ -480,7 +485,7 @@ export class GameScreen {
 
     this.screenEl.classList.toggle("panel-hidden", !visible);
     this.screenEl.classList.toggle("narrow-panel", narrow);
-    this.panelTab.textContent = visible ? "⟩" : "⟨";
+    this.panelTab.innerHTML = visible ? PANEL_TAB_CHEVRON_RIGHT : PANEL_TAB_CHEVRON_LEFT;
     this.panelTab.title = visible ? "隱藏資訊面板" : "顯示資訊面板";
   }
 

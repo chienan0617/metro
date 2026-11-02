@@ -26,7 +26,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   vibration: true,
   reducedMotion: false,
   mapStyle: "continent",
-  sidebarWidth: 336,
+  sidebarWidth: 344,
   sidebarCollapsed: false,
 };
 
